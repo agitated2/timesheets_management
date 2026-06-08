@@ -17,7 +17,7 @@ export default function AuthPage() {
     setLoading(true)
     const { error: err } = await supabase.auth.signInWithOtp({
       email: email.trim().toLowerCase(),
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     })
     setLoading(false)
     if (err) { setError(err.message); return }
@@ -29,7 +29,7 @@ export default function AuthPage() {
     setError('')
     const { error: err } = await supabase.auth.signInWithOtp({
       email: email.trim().toLowerCase(),
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     })
     setResending(false)
     if (err) setError(err.message)

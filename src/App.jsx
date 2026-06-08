@@ -14,6 +14,7 @@ import NotificationsPage from './pages/NotificationsPage'
 import AnalyticsPage from './pages/AnalyticsPage'
 import AdminPage from './pages/AdminPage'
 import SettingsPage from './pages/SettingsPage'
+import AuthCallback from './pages/AuthCallback'
 
 function RoleGate({ allow, children }) {
   const { profile } = useAuth()
@@ -28,6 +29,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/auth" element={user ? <Navigate to="/dashboard" replace /> : <AuthPage />} />
+      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/" element={<Navigate to={user ? '/dashboard' : '/auth'} replace />} />
 
       <Route element={<ProtectedRoute />}>
