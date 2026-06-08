@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
+    "xlsx": "^0.18.5",
     "clsx": "^2.1.0",
     "date-fns": "^3.2.0",
     "lucide-react": "^0.309.0",
