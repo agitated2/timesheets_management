@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
   User, Shield, Search, CheckCircle, ChevronDown,
-  Save, Info, Users, AlertCircle
+  Save, Info, Users, AlertCircle, Lock, Eye, EyeOff
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
@@ -193,6 +193,99 @@ function ProfileSection({ profile, refreshProfile }) {
             )}
           </button>
         </div>
+      </form>
+    </section>
+  )
+}
+
+// ----------------------------------------------------------------
+// Password section — all roles
+// ----------------------------------------------------------------
+function PasswordSection() {
+  const [newPassword, setNewPassword]   = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [showPw, setShowPw]             = useState(false)
+  const [saving, setSaving]             = useState(false)
+  const [saved, setSaved]               = useState(false)
+  const [error, setError]               = useState('')
+
+  async function handleSave(e) {
+    e.preventDefault()
+    setError('')
+    if (newPassword !== confirmPassword) { setError('Passwords do not match.'); return }
+    if (newPassword.length < 6) { setError('Password must be at least 6 characters.'); return }
+    setSaving(true)
+    const { error: err } = await supabase.auth.updateUser({ password: newPassword })
+    setSaving(false)
+    if (err) { setError(err.message); return }
+    setSaved(true)
+    setNewPassword('')
+    setConfirmPassword('')
+    setTimeout(() => setSaved(false), 3000)
+  }
+
+  return (
+    <section className="card p-6 space-y-5">
+      <div className="flex items-center gap-2">
+        <Lock size={18} className="text-blue-500" />
+        <h2 className="font-semibold">Password</h2>
+      </div>
+      <p className="text-sm text-gray-500 dark:text-gray-400 -mt-2">
+        Set or change your password. If you sign in with email links, you can set a password here to use credentials instead.
+      </p>
+
+      <form onSubmit={handleSave} className="space-y-4">
+        <div>
+          <label className="label" htmlFor="new-pw">New password</label>
+          <div className="relative">
+            <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              id="new-pw"
+              type={showPw ? 'text' : 'password'}
+              value={newPassword}
+              onChange={e => setNewPassword(e.target.value)}
+              className="input pl-9 pr-10"
+              placeholder="Min. 6 characters"
+              required
+              minLength={6}
+              autoComplete="new-password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPw(v => !v)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+              tabIndex={-1}
+            >
+              {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="label" htmlFor="confirm-pw">Confirm new password</label>
+          <input
+            id="confirm-pw"
+            type={showPw ? 'text' : 'password'}
+            value={confirmPassword}
+            onChange={e => setConfirmPassword(e.target.value)}
+            className="input"
+            placeholder="Repeat password"
+            required
+            autoComplete="new-password"
+          />
+        </div>
+
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+        <button type="submit" disabled={saving || !newPassword || !confirmPassword} className="btn-primary">
+          {saving ? (
+            <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving…</>
+          ) : saved ? (
+            <><CheckCircle size={15} /> Password updated!</>
+          ) : (
+            <><Save size={15} /> Update password</>
+          )}
+        </button>
       </form>
     </section>
   )
@@ -400,11 +493,13 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-          Manage your profile{isIT ? ' and user roles' : ''}.
+          Manage your profile and password{isIT ? ', and user roles' : ''}.
         </p>
       </div>
 
       <ProfileSection profile={profile} refreshProfile={refreshProfile} />
+
+      <PasswordSection />
 
       {isIT && <RoleManagementSection />}
     </div>
