@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { UserCircle, Search, CheckCircle, AlertCircle } from 'lucide-react'
+import { UserCircle, Search, CheckCircle } from 'lucide-react'
 
 export default function OnboardingPage() {
   const { user, profile, refreshProfile } = useAuth()
@@ -10,29 +10,19 @@ export default function OnboardingPage() {
 
   const [fullName, setFullName]           = useState(profile?.full_name || '')
   const [managers, setManagers]           = useState([])
-  const [managersLoaded, setManagersLoaded] = useState(false)
   const [managerSearch, setManagerSearch] = useState('')
   const [selectedManager, setSelectedManager] = useState(null)
   const [loading, setLoading]             = useState(false)
   const [error, setError]                 = useState('')
 
-  // Roles that don't need a line manager
-  const skipManagerField = ['manager', 'c_suite', 'hr', 'it'].includes(profile?.role)
-
   useEffect(() => {
-    if (skipManagerField) return
     supabase
       .from('profiles')
       .select('id, full_name, email, role')
       .in('role', ['manager', 'c_suite'])
       .order('full_name')
-      .then(({ data }) => {
-        setManagers(data ?? [])
-        setManagersLoaded(true)
-      })
-  }, [skipManagerField])
-
-  const noManagersExist = managersLoaded && managers.length === 0
+      .then(({ data }) => setManagers(data ?? []))
+  }, [])
 
   const filteredManagers = managers.filter(m => {
     const q = managerSearch.toLowerCase()
@@ -42,13 +32,6 @@ export default function OnboardingPage() {
   async function handleSubmit(e) {
     e.preventDefault()
     if (!fullName.trim()) { setError('Please enter your full name.'); return }
-
-    // Require a manager only if: employee role AND managers exist in the system
-    if (!skipManagerField && !noManagersExist && !selectedManager) {
-      setError('Please select your line manager.')
-      return
-    }
-
     setError('')
     setLoading(true)
 
@@ -98,88 +81,71 @@ export default function OnboardingPage() {
               />
             </div>
 
-            {!skipManagerField && (
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="label mb-0">
-                    Line manager
-                    {!noManagersExist && <span className="text-red-500 ml-1">*</span>}
-                  </label>
-                  {noManagersExist && (
-                    <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">Optional for now</span>
-                  )}
-                </div>
-
-                {noManagersExist ? (
-                  // No managers exist yet — show a helpful notice and allow skipping
-                  <div className="flex items-start gap-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4">
-                    <AlertCircle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-sm font-medium text-amber-800 dark:text-amber-300">No managers registered yet</p>
-                      <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
-                        You can continue now and assign your line manager later from <strong>Settings</strong> once your manager has signed up.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <p className="text-xs text-gray-400 mb-2">
-                      Select the manager who will review your timesheets.
-                    </p>
-
-                    {selectedManager ? (
-                      <div className="flex items-center justify-between p-3 rounded-xl border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30">
-                        <div className="flex items-center gap-2">
-                          <CheckCircle size={16} className="text-emerald-500" />
-                          <span className="text-sm font-medium">{selectedManager.full_name || selectedManager.email}</span>
-                          <span className="text-xs text-gray-500">
-                            ({selectedManager.role === 'c_suite' ? 'C-Suite' : 'Manager'})
-                          </span>
-                        </div>
-                        <button type="button" onClick={() => setSelectedManager(null)} className="text-xs text-red-500 hover:underline">
-                          Change
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="relative mb-2">
-                          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                          <input
-                            type="text"
-                            value={managerSearch}
-                            onChange={e => setManagerSearch(e.target.value)}
-                            className="input pl-9"
-                            placeholder="Search by name or email…"
-                          />
-                        </div>
-                        <div className="max-h-48 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-800">
-                          {filteredManagers.length === 0 ? (
-                            <p className="text-sm text-gray-400 text-center py-4">No results</p>
-                          ) : filteredManagers.map(m => (
-                            <button
-                              key={m.id}
-                              type="button"
-                              onClick={() => setSelectedManager(m)}
-                              className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-                            >
-                              <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center text-blue-600 dark:text-blue-400 text-sm font-semibold flex-shrink-0">
-                                {(m.full_name || m.email)[0].toUpperCase()}
-                              </div>
-                              <div>
-                                <p className="text-sm font-medium">{m.full_name || '(No name)'}</p>
-                                <p className="text-xs text-gray-400">
-                                  {m.email} · {m.role === 'c_suite' ? 'C-Suite' : 'Manager'}
-                                </p>
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="label mb-0">Line manager <span className="text-gray-400 font-normal">(if applicable)</span></label>
+                {selectedManager && (
+                  <button type="button" onClick={() => { setSelectedManager(null); setManagerSearch('') }} className="text-xs text-gray-400 hover:text-red-500 transition-colors">
+                    Clear
+                  </button>
                 )}
               </div>
-            )}
+              <p className="text-xs text-gray-400 mb-2">
+                Select who will review your timesheets. You can also do this later from Settings.
+              </p>
+
+              {selectedManager ? (
+                <div className="flex items-center justify-between p-3 rounded-xl border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle size={16} className="text-emerald-500" />
+                    <span className="text-sm font-medium">{selectedManager.full_name || selectedManager.email}</span>
+                    <span className="text-xs text-gray-500">
+                      ({selectedManager.role === 'c_suite' ? 'C-Suite' : 'Manager'})
+                    </span>
+                  </div>
+                  <button type="button" onClick={() => { setSelectedManager(null); setManagerSearch('') }} className="text-xs text-red-500 hover:underline">
+                    Change
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="relative mb-2">
+                    <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      value={managerSearch}
+                      onChange={e => setManagerSearch(e.target.value)}
+                      className="input pl-9"
+                      placeholder="Search by name or email…"
+                    />
+                  </div>
+                  {managerSearch && (
+                    <div className="max-h-48 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-800">
+                      {filteredManagers.length === 0 ? (
+                        <p className="text-sm text-gray-400 text-center py-4">No managers found</p>
+                      ) : filteredManagers.map(m => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => { setSelectedManager(m); setManagerSearch('') }}
+                          className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                        >
+                          <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center text-blue-600 dark:text-blue-400 text-sm font-semibold flex-shrink-0">
+                            {(m.full_name || m.email)[0].toUpperCase()}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">{m.full_name || '(No name)'}</p>
+                            <p className="text-xs text-gray-400">
+                              {m.email} · {m.role === 'c_suite' ? 'C-Suite' : 'Manager'}
+                            </p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
 
             {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
 

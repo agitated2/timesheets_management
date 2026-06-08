@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X } from 'lucide-react'
+import { useNavigate, Link } from 'react-router-dom'
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, UserX } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import clsx from 'clsx'
@@ -18,8 +18,31 @@ function fileToBase64(file) {
 }
 
 export default function UploadPage() {
-  const { user } = useAuth()
+  const { user, profile } = useAuth()
   const navigate = useNavigate()
+
+  // Block upload if no line manager is assigned
+  if (!profile?.manager_id) {
+    return (
+      <div className="max-w-lg mx-auto">
+        <div className="card p-10 text-center space-y-4">
+          <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-950/30 flex items-center justify-center mx-auto">
+            <UserX size={28} className="text-amber-500" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold mb-1">Line manager required</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              You need to assign a line manager before you can upload timesheets.
+              Your manager will receive and review your submissions.
+            </p>
+          </div>
+          <Link to="/settings" className="btn-primary mx-auto">
+            Go to Settings to assign a manager
+          </Link>
+        </div>
+      </div>
+    )
+  }
   const [file, setFile] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [state, setState] = useState('idle') // idle | uploading | success | error
