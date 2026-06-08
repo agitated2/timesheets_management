@@ -1,40 +1,38 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { Mail, KeyRound, ArrowRight, CheckCircle, Sun, Moon } from 'lucide-react'
+import { Mail, KeyRound, ArrowRight, MailCheck, Sun, Moon, RefreshCw } from 'lucide-react'
 import { useTheme } from '../contexts/ThemeContext'
 
 export default function AuthPage() {
   const { isDark, toggle } = useTheme()
-  const [step, setStep] = useState('email') // 'email' | 'otp'
+  const [step, setStep] = useState('email') // 'email' | 'sent'
   const [email, setEmail] = useState('')
-  const [otp, setOtp] = useState('')
   const [loading, setLoading] = useState(false)
+  const [resending, setResending] = useState(false)
   const [error, setError] = useState('')
-  const [info, setInfo] = useState('')
 
-  async function sendOtp(e) {
+  async function sendLink(e) {
     e.preventDefault()
     setError('')
     setLoading(true)
-    const { error: err } = await supabase.auth.signInWithOtp({ email: email.trim().toLowerCase() })
-    setLoading(false)
-    if (err) { setError(err.message); return }
-    setInfo(`A verification code was sent to ${email}`)
-    setStep('otp')
-  }
-
-  async function verifyOtp(e) {
-    e.preventDefault()
-    setError('')
-    setLoading(true)
-    const { error: err } = await supabase.auth.verifyOtp({
+    const { error: err } = await supabase.auth.signInWithOtp({
       email: email.trim().toLowerCase(),
-      token: otp.trim(),
-      type: 'email',
+      options: { emailRedirectTo: window.location.origin },
     })
     setLoading(false)
+    if (err) { setError(err.message); return }
+    setStep('sent')
+  }
+
+  async function resend() {
+    setResending(true)
+    setError('')
+    const { error: err } = await supabase.auth.signInWithOtp({
+      email: email.trim().toLowerCase(),
+      options: { emailRedirectTo: window.location.origin },
+    })
+    setResending(false)
     if (err) setError(err.message)
-    // Successful verification triggers onAuthStateChange → AuthContext handles redirect
   }
 
   return (
@@ -62,10 +60,10 @@ export default function AuthPage() {
             <>
               <h2 className="text-xl font-semibold mb-1">Sign in</h2>
               <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
-                Enter your corporate email to receive a one-time code.
+                Enter your corporate email and we'll send you a sign-in link.
               </p>
 
-              <form onSubmit={sendOtp} className="space-y-4">
+              <form onSubmit={sendLink} className="space-y-4">
                 <div>
                   <label className="label" htmlFor="email">Corporate email</label>
                   <div className="relative">
@@ -79,6 +77,7 @@ export default function AuthPage() {
                       placeholder="you@company.com"
                       required
                       autoComplete="email"
+                      autoFocus
                     />
                   </div>
                 </div>
@@ -86,57 +85,51 @@ export default function AuthPage() {
                 {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
 
                 <button type="submit" disabled={loading || !email} className="btn-primary w-full">
-                  {loading ? 'Sending…' : 'Send verification code'}
+                  {loading ? 'Sending…' : 'Send sign-in link'}
                   <ArrowRight size={16} />
                 </button>
               </form>
             </>
           ) : (
             <>
-              <div className="flex items-center gap-3 mb-4">
-                <CheckCircle size={20} className="text-emerald-500 flex-shrink-0" />
-                <p className="text-sm text-gray-600 dark:text-gray-400">{info}</p>
-              </div>
-
-              <h2 className="text-xl font-semibold mb-1">Enter your code</h2>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
-                Paste the 6-digit code from your email.
-              </p>
-
-              <form onSubmit={verifyOtp} className="space-y-4">
-                <div>
-                  <label className="label" htmlFor="otp">Verification code</label>
-                  <input
-                    id="otp"
-                    type="text"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    value={otp}
-                    onChange={e => setOtp(e.target.value.replace(/\D/g, ''))}
-                    className="input text-center text-2xl tracking-widest font-mono"
-                    placeholder="000000"
-                    required
-                    autoFocus
-                    autoComplete="one-time-code"
-                  />
+              <div className="flex flex-col items-center text-center py-2">
+                <div className="w-16 h-16 rounded-2xl bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center mb-5">
+                  <MailCheck size={32} className="text-blue-600 dark:text-blue-400" />
                 </div>
 
-                {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+                <h2 className="text-xl font-semibold mb-2">Check your inbox</h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">
+                  We sent a sign-in link to
+                </p>
+                <p className="text-sm font-semibold text-gray-900 dark:text-white mb-6 break-all">
+                  {email}
+                </p>
 
-                <button type="submit" disabled={loading || otp.length < 6} className="btn-primary w-full">
-                  {loading ? 'Verifying…' : 'Verify & continue'}
-                  <ArrowRight size={16} />
-                </button>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mb-6">
+                  Click the link in the email to sign in. It expires in 1 hour.
+                  Check your spam folder if you don't see it.
+                </p>
 
-                <button
-                  type="button"
-                  onClick={() => { setStep('email'); setOtp(''); setError('') }}
-                  className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 w-full text-center mt-1"
-                >
-                  Use a different email
-                </button>
-              </form>
+                {error && <p className="text-sm text-red-600 dark:text-red-400 mb-3">{error}</p>}
+
+                <div className="flex flex-col gap-2 w-full">
+                  <button
+                    onClick={resend}
+                    disabled={resending}
+                    className="btn-secondary w-full"
+                  >
+                    <RefreshCw size={15} className={resending ? 'animate-spin' : ''} />
+                    {resending ? 'Resending…' : 'Resend link'}
+                  </button>
+
+                  <button
+                    onClick={() => { setStep('email'); setError('') }}
+                    className="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 py-1"
+                  >
+                    Use a different email
+                  </button>
+                </div>
+              </div>
             </>
           )}
         </div>
