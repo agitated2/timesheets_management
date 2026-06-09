@@ -51,6 +51,15 @@
   }
 }
 
+/* AE7 auth page icon floating animation */
+.ae7-auth-icon {
+  animation: ae7FloatIcon 3s ease-in-out infinite;
+}
+@keyframes ae7FloatIcon {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-5px); }
+}
+
 /* AE7 logo hover animation */
 .ae7-logo {
   cursor: default;

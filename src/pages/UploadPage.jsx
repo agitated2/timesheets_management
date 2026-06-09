@@ -421,13 +421,13 @@ export default function UploadPage() {
           )}
         </div>
 
-        {/* AM/PM warning */}
+        {/* Clock format note */}
         <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl px-4 py-3">
           <AlertTriangle size={15} className="text-amber-500 flex-shrink-0 mt-0.5" />
           <p className="text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
-            <strong>Time format note:</strong> Times written without AM/PM (e.g. "8:00", "9:00") are assumed
-            to be 24-hour clock. If you intended AM times, add <strong>AM</strong> or <strong>PM</strong> to
-            avoid incorrect results (e.g. "8:00 AM" or "9:00 PM").
+            <strong>Use 24-hour clock format.</strong> Times like "09:00 – 17:00" are the most accurate and
+            prevent mistakes. AM/PM notation is supported but error-prone — entering "12:00 AM" instead of
+            "12:00 PM" is a common mistake that causes mismatches. Your file will be checked automatically.
           </p>
         </div>
 

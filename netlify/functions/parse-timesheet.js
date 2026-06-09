@@ -31,20 +31,22 @@ exports.handler = async (event) => {
     if (!file) return { statusCode: 400, headers, body: JSON.stringify({ error: 'No file provided' }) }
 
     const buffer = Buffer.from(file, 'base64')
-    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
+    // XLSX.read with cellDates:true mutates cell types in-place (n→d), so a second
+    // read without cellDates is required to get raw fractional-day numbers for the
+    // Total Hours column (e.g. 0.0833 = 2 h) needed for discrepancy detection.
+    const workbook    = XLSX.read(buffer, { type: 'buffer', cellDates: true })
+    const workbookRaw = XLSX.read(buffer, { type: 'buffer' })
 
     // Prefer a sheet named "Weekly" or "Week"; fall back to first sheet
     const preferredNames = ['weekly', 'week', 'timesheet']
     const sheetName =
       workbook.SheetNames.find(n => preferredNames.includes(n.toLowerCase())) ||
       workbook.SheetNames[0]
-    const sheet = workbook.Sheets[sheetName]
+    const sheet    = workbook.Sheets[sheetName]
+    const sheetRaw = workbookRaw.Sheets[sheetName]
 
-    // Two reads:
-    //   rows    — cellDates:true → Date objects for date/time cells
-    //   rawRows — raw:true only  → fractional-day numbers for Total Hours cells
-    const rows    = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '',   raw: true, cellDates: true })
-    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true })
+    const rows    = XLSX.utils.sheet_to_json(sheet,    { header: 1, defval: '',   raw: true })
+    const rawRows = XLSX.utils.sheet_to_json(sheetRaw, { header: 1, defval: null, raw: true })
 
     const { days, discrepancies } = parseSheetMultiDay(rows, rawRows)
 
@@ -248,13 +250,12 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
       else if (descStr)        task = descStr
 
       // ── Discrepancy check ─────────────────────────────────────
-      // rawRows has Total Hours as a fractional day (0 < n < 1).
-      // If the stated hours differ from the calculated hours by more
-      // than 6 minutes (0.1 h), flag the row for the user to review.
+      // Total Hours may be stored as a fractional-day serial (e.g. 0.0833 = 2 h)
+      // or as a plain decimal (e.g. 2.0). Mismatches > 0.1 h are flagged.
       if (block.totalHoursCol !== -1 && rawRows?.[i]) {
         const rawTotal = rawRows[i][block.totalHoursCol]
-        if (typeof rawTotal === 'number' && rawTotal > 0 && rawTotal < 1) {
-          const statedHours = round2(rawTotal * 24)
+        if (typeof rawTotal === 'number' && rawTotal > 0 && rawTotal <= 24) {
+          const statedHours = rawTotal < 1 ? round2(rawTotal * 24) : round2(rawTotal)
           if (Math.abs(parsed.hours - statedHours) > 0.1) {
             discrepancies.push({
               date:            currentDate,

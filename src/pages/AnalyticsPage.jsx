@@ -188,7 +188,7 @@ export default function AnalyticsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
+      <div className="flex items-center justify-between flex-wrap gap-3 lg:pr-14">
         <div>
           <h1 className="text-2xl font-bold">Analytics</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Approved timesheets only</p>

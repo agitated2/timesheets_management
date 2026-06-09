@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { Mail, Lock, Eye, EyeOff, ArrowRight, MailCheck, Sun, Moon, RefreshCw, ArrowLeft } from 'lucide-react'
+import { Mail, Lock, Eye, EyeOff, ArrowRight, MailCheck, Sun, Moon, RefreshCw, ArrowLeft, Building2 } from 'lucide-react'
 import { useTheme } from '../contexts/ThemeContext'
+import Logo from '../components/Logo'
 import clsx from 'clsx'
 
 export default function AuthPage() {
@@ -66,7 +67,7 @@ export default function AuthPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-950 dark:to-gray-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-rose-50 to-red-50 dark:from-gray-950 dark:to-gray-900 flex items-center justify-center p-4">
       <button
         onClick={toggle}
         className="fixed top-4 right-4 p-2 rounded-xl bg-white dark:bg-gray-800 shadow text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
@@ -78,11 +79,11 @@ export default function AuthPage() {
       <div className="w-full max-w-md">
         {/* Brand */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600 mb-4 shadow-lg">
-            <Lock size={26} className="text-white" />
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-ae7-red mb-4 shadow-lg ae7-auth-icon">
+            <Building2 size={26} className="text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">TimeTrack</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Timesheet Management Platform</p>
+          <div className="mb-1"><Logo size="lg" showPortal={true} /></div>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Welcome to AE7 Portal</p>
         </div>
 
         <div className="card p-8">
@@ -159,7 +160,7 @@ export default function AuthPage() {
                 <p className="text-xs text-gray-400 mb-3">Don't have a password, or prefer a link?</p>
                 <button
                   onClick={() => { setMode('magic-link'); setLinkEmail(credEmail); setLinkError('') }}
-                  className="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                  className="text-sm font-medium text-ae7-red hover:underline"
                 >
                   Sign in with email link instead
                 </button>
@@ -223,8 +224,8 @@ export default function AuthPage() {
           {/* ── Link sent ────────────────────────────────────── */}
           {mode === 'link-sent' && (
             <div className="flex flex-col items-center text-center py-2">
-              <div className="w-16 h-16 rounded-2xl bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center mb-5">
-                <MailCheck size={32} className="text-blue-600 dark:text-blue-400" />
+              <div className="w-16 h-16 rounded-2xl bg-ae7-light dark:bg-ae7-red/10 flex items-center justify-center mb-5">
+                <MailCheck size={32} className="text-ae7-red dark:text-red-400" />
               </div>
 
               <h2 className="text-xl font-semibold mb-2">Check your inbox</h2>

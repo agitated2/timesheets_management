@@ -61,12 +61,11 @@ function Toast({ message, type }) {
 // Profile section — all roles
 // ----------------------------------------------------------------
 function ProfileSection({ profile, refreshProfile }) {
-  const [name, setName]             = useState(profile.full_name || '')
-  const [managers, setManagers]     = useState([])
-  const [managerId, setManagerId]   = useState(profile.manager_id || '')
-  const [managerSearch, setMgrSearch] = useState('')
-  const [saving, setSaving]         = useState(false)
-  const [saved, setSaved]           = useState(false)
+  const [name, setName]         = useState(profile.full_name || '')
+  const [managers, setManagers] = useState([])
+  const [managerId]             = useState(profile.manager_id || '')
+  const [saving, setSaving]     = useState(false)
+  const [saved, setSaved]       = useState(false)
 
   const isEmployee = profile.role === 'employee'
 
@@ -83,17 +82,10 @@ function ProfileSection({ profile, refreshProfile }) {
   async function save(e) {
     e.preventDefault()
     setSaving(true)
-    const updates = { full_name: name.trim() }
-    if (isEmployee && managerId) updates.manager_id = managerId
-    const { error } = await supabase.from('profiles').update(updates).eq('id', profile.id)
+    const { error } = await supabase.from('profiles').update({ full_name: name.trim() }).eq('id', profile.id)
     setSaving(false)
     if (!error) { setSaved(true); setTimeout(() => setSaved(false), 2000); await refreshProfile() }
   }
-
-  const filteredManagers = managers.filter(m => {
-    const q = managerSearch.toLowerCase()
-    return (m.full_name || '').toLowerCase().includes(q) || m.email.toLowerCase().includes(q)
-  })
 
   const currentManager = managers.find(m => m.id === managerId)
 
@@ -137,47 +129,21 @@ function ProfileSection({ profile, refreshProfile }) {
           />
         </div>
 
-        {/* Manager selection — employees only */}
+        {/* Line manager — read-only after onboarding */}
         {isEmployee && (
           <div>
             <label className="label">Line manager</label>
             {currentManager && (
-              <div className="flex items-center gap-2 mb-2 text-sm text-gray-500 dark:text-gray-400">
+              <div className="flex items-center gap-2 mb-3 text-sm text-gray-500 dark:text-gray-400">
                 <CheckCircle size={14} className="text-emerald-500" />
                 Currently: <span className="font-medium text-gray-900 dark:text-gray-100">{currentManager.full_name || currentManager.email}</span>
               </div>
             )}
-            <div className="relative mb-2">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                value={managerSearch}
-                onChange={e => setMgrSearch(e.target.value)}
-                className="input pl-9 text-sm"
-                placeholder="Search managers…"
-              />
-            </div>
-            <div className="max-h-40 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-800">
-              {filteredManagers.map(m => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => { setManagerId(m.id); setMgrSearch('') }}
-                  className={clsx(
-                    'w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm',
-                    managerId === m.id && 'bg-blue-50 dark:bg-blue-950/20'
-                  )}
-                >
-                  <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 text-xs font-semibold flex-shrink-0">
-                    {(m.full_name || m.email)[0].toUpperCase()}
-                  </div>
-                  <div className="min-w-0">
-                    <span className="font-medium truncate">{m.full_name || '(No name)'}</span>
-                    <span className="text-xs text-gray-400 ml-2">{m.email}</span>
-                  </div>
-                  {managerId === m.id && <CheckCircle size={14} className="text-blue-500 ml-auto flex-shrink-0" />}
-                </button>
-              ))}
+            <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/20 rounded-xl p-3">
+              <Info size={14} className="text-blue-500 flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-blue-700 dark:text-blue-300">
+                To change your line manager, please contact your IT department.
+              </p>
             </div>
           </div>
         )}
