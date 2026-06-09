@@ -24,7 +24,7 @@
   }
   .btn-primary {
     @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
-           bg-blue-600 hover:bg-blue-700 active:bg-blue-800
+           bg-ae7-red hover:bg-ae7-dark active:bg-ae7-dark
            text-white font-medium text-sm transition-colors
            disabled:opacity-50 disabled:cursor-not-allowed;
   }
@@ -49,6 +49,19 @@
   .label {
     @apply block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5;
   }
+}
+
+/* AE7 logo hover animation */
+.ae7-logo {
+  cursor: default;
+  user-select: none;
+  transition: transform 0.2s ease, filter 0.2s ease;
+  display: inline-flex;
+  align-items: baseline;
+}
+.ae7-logo:hover {
+  transform: scale(1.06);
+  filter: drop-shadow(0 1px 6px rgba(196, 18, 48, 0.4));
 }
 
 /* Custom scrollbar */

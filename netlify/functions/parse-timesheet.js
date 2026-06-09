@@ -39,9 +39,14 @@ exports.handler = async (event) => {
       workbook.SheetNames.find(n => preferredNames.includes(n.toLowerCase())) ||
       workbook.SheetNames[0]
     const sheet = workbook.Sheets[sheetName]
-    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true, blankrows: false })
 
-    const days = parseSheetMultiDay(rawRows)
+    // Two reads:
+    //   rows    — cellDates:true → Date objects for date/time cells
+    //   rawRows — raw:true only  → fractional-day numbers for Total Hours cells
+    const rows    = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '',   raw: true, cellDates: true })
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true })
+
+    const { days, discrepancies } = parseSheetMultiDay(rows, rawRows)
 
     if (days.length === 0) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'No valid dates or time entries found in the uploaded file.' }) }
@@ -62,6 +67,20 @@ exports.handler = async (event) => {
           days: preview,
           totalDays: days.length,
           totalHours: round2(preview.reduce((s, d) => s + d.hours, 0)),
+          discrepancies,
+          hasDiscrepancies: discrepancies.length > 0,
+        }),
+      }
+    }
+
+    // ── Block actual upload if the file has discrepancies ───────
+    if (discrepancies.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: `File contains ${discrepancies.length} time discrepanc${discrepancies.length === 1 ? 'y' : 'ies'}. Please fix them before uploading.`,
+          discrepancies,
         }),
       }
     }
@@ -114,42 +133,42 @@ exports.handler = async (event) => {
 
 // ---------------------------------------------------------------
 // TOP-LEVEL DISPATCHER
-// Tries formats in priority order; first one with results wins.
 // ---------------------------------------------------------------
 
-function parseSheetMultiDay(rows) {
+function parseSheetMultiDay(rows, rawRows) {
   // 1. Standard columnar weekly table (Day | Date | Project | Stage | Time | Description)
-  //    This is the primary company format — two side-by-side week blocks per sheet.
-  const weekly = tryParseWeeklyTableFormat(rows)
-  if (weekly.length > 0) return weekly
+  const result = tryParseWeeklyTableFormat(rows, rawRows)
+  if (result.days.length > 0) return result
 
-  // 2. Section-based format: explicit "Date:" label rows divide day sections.
-  const sectionBased = tryParseSectionFormat(rows)
-  if (sectionBased.length > 0) return sectionBased
+  // 2. Section-based: explicit "Date:" label rows
+  const sectionDays = tryParseSectionFormat(rows)
+  if (sectionDays.length > 0) return { days: sectionDays, discrepancies: [] }
 
-  // 3. Legacy single-day fallback (original logic).
+  // 3. Legacy single-day fallback
   const legacy = parseLegacySingleDay(rows)
   if (legacy.date && legacy.entries.length > 0) {
-    return [{ date: legacy.date, entries: legacy.entries }]
+    return { days: [{ date: legacy.date, entries: legacy.entries }], discrepancies: [] }
   }
 
-  return []
+  return { days: [], discrepancies: [] }
 }
 
 // ---------------------------------------------------------------
 // FORMAT 1 — Columnar weekly table
 //
-// Detects any sheet where a header row contains "Day" and "Date"
-// columns. The Day cell (Sun/Mon/Tue…) marks the start of each
-// day's block; entries span multiple rows under the same day.
-// Two side-by-side week blocks (common in the standard template)
-// are both parsed.
+// Detects any sheet where a header row (within the first 10 rows)
+// contains "Day" and "Date" columns.  The Day cell (Sun/Mon/Tue…)
+// marks the start of each day's block; entries span multiple rows
+// under the same day.  Two side-by-side week blocks are both parsed.
+//
+// Also compares each entry's calculated hours against the Total Hours
+// column (read from rawRows as a fractional-day serial — e.g. 0.14583
+// = 3.5 h).  Mismatches > 0.1 h are collected as discrepancies.
 // ---------------------------------------------------------------
 
-function tryParseWeeklyTableFormat(rows) {
+function tryParseWeeklyTableFormat(rows, rawRows) {
   const DAY_NAMES = new Set(['sun','mon','tue','wed','thu','fri','sat'])
 
-  // Find header row (within first 10 rows): must contain 'day' AND 'date'
   let headerRowIdx = -1
   for (let i = 0; i < Math.min(rows.length, 10); i++) {
     const lower = rows[i].map(c => String(c || '').toLowerCase().trim())
@@ -158,17 +177,15 @@ function tryParseWeeklyTableFormat(rows) {
       break
     }
   }
-  if (headerRowIdx === -1) return []
+  if (headerRowIdx === -1) return { days: [], discrepancies: [] }
 
   const hdrs = rows[headerRowIdx].map(c => String(c || '').toLowerCase().trim())
 
-  // Locate every "block" that starts with a 'day' + 'date' column pair
   const blocks = []
   for (let c = 0; c < hdrs.length; c++) {
     if (hdrs[c] !== 'day') continue
     if (c + 1 >= hdrs.length || hdrs[c + 1] !== 'date') continue
 
-    // Search rightward for related columns (within 10 cols of this Day col)
     const findNear = (keyword) => {
       for (let k = c; k < Math.min(hdrs.length, c + 10); k++) {
         if (hdrs[k] === keyword || hdrs[k].startsWith(keyword)) return k
@@ -176,35 +193,34 @@ function tryParseWeeklyTableFormat(rows) {
       return -1
     }
 
-    const timeCol    = findNear('time')
-    if (timeCol === -1) continue // this block has no time column — skip
+    const timeCol = findNear('time')
+    if (timeCol === -1) continue
 
     blocks.push({
-      dayCol:     c,
-      dateCol:    c + 1,
-      projectCol: findNear('project'),
-      stageCol:   findNear('stage'),
+      dayCol:        c,
+      dateCol:       c + 1,
+      projectCol:    findNear('project'),
+      stageCol:      findNear('stage'),
+      totalHoursCol: findNear('total'),
       timeCol,
-      descCol:    findNear('description') !== -1 ? findNear('description') : findNear('desc'),
+      descCol:       findNear('description') !== -1 ? findNear('description') : findNear('desc'),
     })
   }
 
-  if (blocks.length === 0) return []
+  if (blocks.length === 0) return { days: [], discrepancies: [] }
 
-  // dayMap: ISO date → entries[]
-  const dayMap = new Map()
+  const dayMap        = new Map()
+  const discrepancies = []
 
   for (const block of blocks) {
     let currentDate = null
 
     for (let i = headerRowIdx + 1; i < rows.length; i++) {
-      const row = rows[i]
+      const row     = rows[i]
       const dayCell = String(row[block.dayCol] || '').trim()
 
-      // Stop at footer row (e.g. "TOTAL HOURS")
       if (/^total/i.test(dayCell)) break
 
-      // New day: Day cell is a day-of-week abbreviation + adjacent Date cell is non-empty
       const dayKey = dayCell.toLowerCase().slice(0, 3)
       if (DAY_NAMES.has(dayKey)) {
         const rawDate = row[block.dateCol]
@@ -214,7 +230,6 @@ function tryParseWeeklyTableFormat(rows) {
 
       if (!currentDate) continue
 
-      // Entry: Time cell must be a non-empty string (not a Date object from Excel)
       const rawTime = block.timeCol !== -1 ? row[block.timeCol] : null
       if (!rawTime || rawTime instanceof Date) continue
       const timeStr = String(rawTime).trim()
@@ -227,11 +242,31 @@ function tryParseWeeklyTableFormat(rows) {
       const stageStr   = block.stageCol   !== -1 ? String(row[block.stageCol]   || '').trim() : ''
       const descStr    = block.descCol    !== -1 ? String(row[block.descCol]    || '').trim() : ''
 
-      // Combine Stage + Description into task ("SD — Joinery details")
       let task = null
       if (stageStr && descStr) task = `${stageStr} — ${descStr}`
       else if (stageStr)       task = stageStr
       else if (descStr)        task = descStr
+
+      // ── Discrepancy check ─────────────────────────────────────
+      // rawRows has Total Hours as a fractional day (0 < n < 1).
+      // If the stated hours differ from the calculated hours by more
+      // than 6 minutes (0.1 h), flag the row for the user to review.
+      if (block.totalHoursCol !== -1 && rawRows?.[i]) {
+        const rawTotal = rawRows[i][block.totalHoursCol]
+        if (typeof rawTotal === 'number' && rawTotal > 0 && rawTotal < 1) {
+          const statedHours = round2(rawTotal * 24)
+          if (Math.abs(parsed.hours - statedHours) > 0.1) {
+            discrepancies.push({
+              date:            currentDate,
+              rowNumber:       i + 1,
+              project:         projectStr || '(unknown)',
+              timeRange:       `${parsed.from} – ${parsed.to}`,
+              calculatedHours: parsed.hours,
+              statedHours,
+            })
+          }
+        }
+      }
 
       if (!dayMap.has(currentDate)) dayMap.set(currentDate, [])
       dayMap.get(currentDate).push({
@@ -244,19 +279,16 @@ function tryParseWeeklyTableFormat(rows) {
     }
   }
 
-  // Sort by date, exclude days with no entries
-  return [...dayMap.entries()]
+  const days = [...dayMap.entries()]
     .filter(([, entries]) => entries.length > 0)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, entries]) => ({ date, entries }))
+
+  return { days, discrepancies }
 }
 
 // ---------------------------------------------------------------
 // FORMAT 2 — Section-based (explicit "Date:" label rows)
-//
-// Each day starts with a row containing "Date: 2024-06-03" or
-// a two-cell "Date" | "2024-06-03" pattern.  Entries follow until
-// the next "Date:" marker.
 // ---------------------------------------------------------------
 
 function tryParseSectionFormat(rows) {
@@ -264,7 +296,7 @@ function tryParseSectionFormat(rows) {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]
     for (let j = 0; j < row.length; j++) {
-      const cell = row[j]
+      const cell    = row[j]
       const cellStr = String(cell || '').trim()
       let d = null
 
@@ -282,15 +314,14 @@ function tryParseSectionFormat(rows) {
 
   const days = []
   for (let m = 0; m < markers.length; m++) {
-    const start = markers[m].rowIdx
-    const end   = m + 1 < markers.length ? markers[m + 1].rowIdx : rows.length
+    const start   = markers[m].rowIdx
+    const end     = m + 1 < markers.length ? markers[m + 1].rowIdx : rows.length
     const entries = parseSectionEntries(rows.slice(start, end))
     if (entries.length > 0) days.push({ date: markers[m].date, entries })
   }
   return days
 }
 
-// Parse entries within a scoped section of rows (already cut to one day)
 function parseSectionEntries(rows) {
   const TIME_KW    = ['time', 'hours', 'from', 'duration']
   const PROJECT_KW = ['project', 'work', 'client']
@@ -298,7 +329,7 @@ function parseSectionEntries(rows) {
 
   let headerRowIdx = -1
   for (let i = 0; i < rows.length; i++) {
-    const lower = rows[i].map(c => String(c).toLowerCase().trim())
+    const lower      = rows[i].map(c => String(c).toLowerCase().trim())
     const hasTime    = lower.some(h => TIME_KW.some(k => h.includes(k)))
     const hasProject = lower.some(h => PROJECT_KW.some(k => h.includes(k)))
     if (hasTime && hasProject) { headerRowIdx = i; break }
@@ -323,9 +354,9 @@ function parseSectionEntries(rows) {
 
     const parsed = parseTimeRange(rawTime)
     entries.push({
-      time_from:     parsed?.from    ?? null,
-      time_to:       parsed?.to      ?? null,
-      hours_decimal: parsed?.hours   ?? null,
+      time_from:     parsed?.from  ?? null,
+      time_to:       parsed?.to    ?? null,
+      hours_decimal: parsed?.hours ?? null,
       project_name:  rawProject || null,
       task:          rawTask    || null,
     })
@@ -335,17 +366,13 @@ function parseSectionEntries(rows) {
 
 // ---------------------------------------------------------------
 // FORMAT 3 — Legacy single-day fallback
-//
-// Searches the first ~5 rows for any date indicator, then finds
-// a single header + entry block.  Handles raw Date objects and
-// Excel serial numbers.
 // ---------------------------------------------------------------
 
 function parseLegacySingleDay(rows) {
   const TIME_KW    = ['time', 'hours', 'from', 'duration']
   const PROJECT_KW = ['project', 'work', 'client']
 
-  let date = null
+  let date         = null
   let headerRowIdx = -1
 
   for (let i = 0; i < rows.length; i++) {
@@ -353,7 +380,7 @@ function parseLegacySingleDay(rows) {
 
     if (!date && i < 5) {
       for (let j = 0; j < row.length; j++) {
-        const cell = row[j]
+        const cell    = row[j]
         const cellStr = String(cell).trim()
 
         if (/^date\s*:?\s*$/i.test(cellStr) && j + 1 < row.length) {
@@ -367,14 +394,14 @@ function parseLegacySingleDay(rows) {
         }
         if (!date && typeof cell === 'number' && cell > 40000 && cell < 60000) {
           const d = XLSX.SSF.parse_date_code(cell)
-          if (d) date = `${d.y}-${pad(d.m)}-${pad(d.d)}`; break
+          if (d) { date = `${d.y}-${pad(d.m)}-${pad(d.d)}`; break }
         }
         if (!date && isDateString(cellStr)) date = normalizeDate(cellStr)
       }
     }
 
     if (headerRowIdx === -1) {
-      const lower = row.map(c => String(c).toLowerCase().trim())
+      const lower      = row.map(c => String(c).toLowerCase().trim())
       const hasTime    = lower.some(h => TIME_KW.some(k => h.includes(k)))
       const hasProject = lower.some(h => PROJECT_KW.some(k => h.includes(k)))
       if (hasTime && hasProject) headerRowIdx = i
@@ -388,7 +415,7 @@ function parseLegacySingleDay(rows) {
 }
 
 // ---------------------------------------------------------------
-// SHARED PARSING UTILITIES
+// SHARED UTILITIES
 // ---------------------------------------------------------------
 
 function findColIdx(headers, keywords) {
@@ -414,7 +441,7 @@ function parseTimeRange(raw) {
   if (from === null || to === null) return null
 
   let hours = to - from
-  if (hours < 0) hours += 24 // overnight shift
+  if (hours < 0) hours += 24
 
   return {
     from:  decimalToHHMM(from),
@@ -426,7 +453,7 @@ function parseTimeRange(raw) {
 function parseTimeDecimal(s) {
   const clean = s.trim().replace(/\s+/g, ' ')
 
-  // 12-hour: "2:30 PM", "2PM", "2:30pm", "02:30 AM"
+  // 12-hour: "2:30 PM", "2PM", "2:30pm"
   const m12 = clean.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i)
   if (m12) {
     let h = parseInt(m12[1], 10)
@@ -437,19 +464,19 @@ function parseTimeDecimal(s) {
     return h + m / 60
   }
 
-  // HH:MM:SS — seconds present, ignore them ("1:30:00", "13:30:00")
+  // HH:MM:SS — strip seconds ("1:30:00", "13:30:00")
   const m24s = clean.match(/^(\d{1,2}):(\d{2}):\d{2}$/)
   if (m24s) return parseInt(m24s[1], 10) + parseInt(m24s[2], 10) / 60
 
-  // HH:MM — standard 24-hour ("14:30", "09:00")
+  // HH:MM — 24-hour ("14:30", "09:00")
   const m24 = clean.match(/^(\d{1,2}):(\d{2})$/)
   if (m24) return parseInt(m24[1], 10) + parseInt(m24[2], 10) / 60
 
-  // Bare hour integer ("14", "9")
+  // Bare integer hour
   const mH = clean.match(/^(\d{1,2})$/)
   if (mH) return parseInt(mH[1], 10)
 
-  // Excel fractional day (e.g. 0.375 = 09:00)
+  // Excel fractional day (0.375 = 09:00)
   const n = parseFloat(clean)
   if (!isNaN(n) && n >= 0 && n < 1) return n * 24
 
@@ -469,14 +496,12 @@ function normalizeDate(val) {
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
 
-  // DD/MM/YYYY or MM/DD/YYYY
-  const slashMatch = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/)
-  if (slashMatch) {
-    const a = parseInt(slashMatch[1], 10)
-    const b = parseInt(slashMatch[2], 10)
-    const y = slashMatch[3]
-    if (a > 12) return `${y}-${pad(b)}-${pad(a)}`
-    return `${y}-${pad(a)}-${pad(b)}`
+  const slash = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/)
+  if (slash) {
+    const a = parseInt(slash[1], 10)
+    const b = parseInt(slash[2], 10)
+    const y = slash[3]
+    return a > 12 ? `${y}-${pad(b)}-${pad(a)}` : `${y}-${pad(a)}-${pad(b)}`
   }
 
   const d = new Date(s)
@@ -486,16 +511,14 @@ function normalizeDate(val) {
 
 function isDateString(s) {
   if (s.length < 6) return false
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return true
-  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)) return true
-  return false
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) || /^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)
 }
 
 function toISODate(d) {
-  // Excel Date objects from timezone-aware workbooks (e.g. UAE UTC+4) arrive with
-  // a UTC time near-but-before midnight (e.g. 19:59 UTC = 23:59 local).
-  // Adding 12 hours before extracting the UTC date reliably recovers the intended
-  // calendar date regardless of where the server is running.
+  // Excel Date objects from timezone-aware workbooks (e.g. UAE UTC+4) arrive with a
+  // UTC timestamp near-but-before midnight (19:59 UTC = 23:59 local).  Adding 12 h
+  // before extracting the UTC date recovers the intended calendar date regardless of
+  // which timezone the server is in.
   const shifted = new Date(d.getTime() + 12 * 3600 * 1000)
   return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`
 }

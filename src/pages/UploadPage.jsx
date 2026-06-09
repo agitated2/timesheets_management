@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import {
   Upload, FileSpreadsheet, CheckCircle, AlertCircle, X,
-  UserX, Calendar, Clock, ChevronDown, ChevronUp, AlertTriangle,
+  UserX, Calendar, Clock, ChevronDown, ChevronUp, AlertTriangle, XCircle,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
@@ -123,8 +123,8 @@ function SuccessScreen({ result, onReset, navigate }) {
 
 // ── Confirmation screen ──────────────────────────────────────────
 function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
-  const { days, totalDays, totalHours } = preview
-  const isMulti = totalDays > 1
+  const { days, totalDays, totalHours, discrepancies = [], hasDiscrepancies = false } = preview
+  const isMulti   = totalDays > 1
   const dateRange = isMulti
     ? `${format(parseISO(days[0].date), 'MMM d')} – ${format(parseISO(days[days.length - 1].date), 'MMM d, yyyy')}`
     : format(parseISO(days[0].date), 'MMMM d, yyyy')
@@ -133,67 +133,118 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
     <div className="max-w-lg mx-auto space-y-5">
       <div className="card p-6 space-y-5">
         <div className="text-center">
-          <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center mx-auto mb-3">
-            <Calendar size={22} className="text-blue-600 dark:text-blue-400" />
+          <div className={clsx(
+            'w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-3',
+            hasDiscrepancies
+              ? 'bg-red-50 dark:bg-red-950/30'
+              : 'bg-gray-50 dark:bg-gray-800'
+          )}>
+            {hasDiscrepancies
+              ? <XCircle size={22} className="text-red-500" />
+              : <Calendar size={22} className="text-ae7-red" />
+            }
           </div>
-          <h2 className="text-lg font-semibold">Confirm submission</h2>
+          <h2 className="text-lg font-semibold">
+            {hasDiscrepancies ? 'Discrepancies found' : 'Confirm submission'}
+          </h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            You are uploading {isMulti
-              ? <strong>timesheets for {totalDays} days</strong>
-              : <strong>a timesheet for 1 day</strong>
-            }.
+            {hasDiscrepancies
+              ? 'Your file has time mismatches between the Time and Total Hours columns.'
+              : <>You are uploading {isMulti
+                  ? <strong>timesheets for {totalDays} days</strong>
+                  : <strong>a timesheet for 1 day</strong>
+                }.</>
+            }
           </p>
-          {isMulti && (
+          {!hasDiscrepancies && isMulti && (
             <p className="text-xs text-gray-400 mt-0.5">{dateRange}</p>
           )}
         </div>
 
-        {/* Day-by-day table */}
-        <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
-          <div className="grid grid-cols-3 text-xs font-semibold text-gray-400 uppercase tracking-wider px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-            <span>Date</span>
-            <span className="text-center">Entries</span>
-            <span className="text-right">Hours</span>
-          </div>
-          {days.map(d => (
-            <div key={d.date} className="grid grid-cols-3 px-4 py-2.5 text-sm border-b border-gray-100 dark:border-gray-800 last:border-0">
-              <span className="font-medium">{format(parseISO(d.date), 'EEE, MMM d')}</span>
-              <span className="text-center text-gray-500">{d.entriesCount}</span>
-              <span className="text-right text-gray-700 dark:text-gray-300">{d.hours}h</span>
+        {/* ── Discrepancy list ─────────────────────────────────── */}
+        {hasDiscrepancies && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {discrepancies.length} issue{discrepancies.length !== 1 ? 's' : ''} to fix
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {discrepancies.map((d, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-800 dark:text-gray-200 truncate">
+                        {d.project} · {format(parseISO(d.date), 'EEE MMM d')}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                        Time range <strong>{d.timeRange}</strong> = <strong>{d.calculatedHours}h</strong>
+                        {' '}but Total Hours column shows <strong>{d.statedHours}h</strong>
+                      </p>
+                    </div>
+                    <span className="text-xs font-mono bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 px-2 py-0.5 rounded-md flex-shrink-0 whitespace-nowrap">
+                      Row {d.rowNumber}
+                    </span>
+                  </div>
+                  {Math.abs(d.calculatedHours - d.statedHours) >= 10 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1.5 flex items-center gap-1">
+                      <AlertTriangle size={11} className="flex-shrink-0" />
+                      Large gap — possible AM/PM confusion (e.g. 12:00 AM instead of 12:00 PM)?
+                    </p>
+                  )}
+                </div>
+              ))}
             </div>
-          ))}
-          <div className="grid grid-cols-3 px-4 py-2.5 text-sm font-semibold bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
-            <span>Total</span>
-            <span className="text-center text-gray-500">{days.reduce((s, d) => s + d.entriesCount, 0)}</span>
-            <span className="text-right text-blue-600 dark:text-blue-400">{totalHours}h</span>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Please fix these in your Excel file and re-upload. Row numbers match the Excel row display.
+            </p>
           </div>
-        </div>
+        )}
 
-        <p className="text-xs text-gray-400 text-center">
-          {isMulti
-            ? 'This will create one timesheet submission per day. Each day is reviewed independently.'
-            : 'Your manager will be notified to review this timesheet.'}
-        </p>
+        {/* ── Day-by-day table (only shown when no discrepancies) ─ */}
+        {!hasDiscrepancies && (
+          <>
+            <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+              <div className="grid grid-cols-3 text-xs font-semibold text-gray-400 uppercase tracking-wider px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+                <span>Date</span>
+                <span className="text-center">Entries</span>
+                <span className="text-right">Hours</span>
+              </div>
+              {days.map(d => (
+                <div key={d.date} className="grid grid-cols-3 px-4 py-2.5 text-sm border-b border-gray-100 dark:border-gray-800 last:border-0">
+                  <span className="font-medium">{format(parseISO(d.date), 'EEE, MMM d')}</span>
+                  <span className="text-center text-gray-500">{d.entriesCount}</span>
+                  <span className="text-right text-gray-700 dark:text-gray-300">{d.hours}h</span>
+                </div>
+              ))}
+              <div className="grid grid-cols-3 px-4 py-2.5 text-sm font-semibold bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+                <span>Total</span>
+                <span className="text-center text-gray-500">{days.reduce((s, d) => s + d.entriesCount, 0)}</span>
+                <span className="text-right text-ae7-red">{totalHours}h</span>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 text-center">
+              {isMulti
+                ? 'This will create one timesheet submission per day. Each day is reviewed independently.'
+                : 'Your manager will be notified to review this timesheet.'}
+            </p>
+          </>
+        )}
 
         <div className="flex gap-3">
-          <button
-            onClick={onCancel}
-            disabled={confirming}
-            className="btn-secondary flex-1"
-          >
-            Cancel
+          <button onClick={onCancel} disabled={confirming} className="btn-secondary flex-1">
+            {hasDiscrepancies ? 'Back' : 'Cancel'}
           </button>
-          <button
-            onClick={onConfirm}
-            disabled={confirming}
-            className="btn-primary flex-1"
-          >
-            {confirming ? (
-              <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Submitting…</>
-            ) : (
-              <><CheckCircle size={15} /> Confirm & Submit</>
-            )}
-          </button>
+          {hasDiscrepancies ? (
+            <div className="flex-1 flex items-center justify-center px-4 py-2.5 rounded-xl bg-gray-100 dark:bg-gray-800 text-xs text-gray-400 font-medium text-center">
+              Fix file to continue
+            </div>
+          ) : (
+            <button onClick={onConfirm} disabled={confirming} className="btn-primary flex-1">
+              {confirming
+                ? <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Submitting…</>
+                : <><CheckCircle size={15} /> Confirm &amp; Submit</>
+              }
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -381,13 +432,13 @@ export default function UploadPage() {
         </div>
 
         {/* Format hint */}
-        <div className="bg-blue-50 dark:bg-blue-950/20 rounded-xl p-4">
-          <p className="text-xs font-semibold text-blue-700 dark:text-blue-400 mb-2">Expected file format</p>
-          <ul className="text-xs text-blue-600 dark:text-blue-400 space-y-1">
-            <li>• Each day section starts with a <strong>Date:</strong> label (e.g. "Date: 2024-01-15")</li>
-            <li>• Header row: <strong>Time</strong> | <strong>Project Name</strong> | <strong>Task</strong></li>
-            <li>• Time format: <strong>9:00 AM – 5:00 PM</strong>, <strong>09:00 – 17:00</strong>, etc.</li>
-            <li>• Multiple day sections in one file are supported for weekly timesheets</li>
+        <div className="bg-gray-50 dark:bg-gray-800/60 rounded-xl p-4 border border-gray-200 dark:border-gray-700">
+          <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Accepted formats</p>
+          <ul className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+            <li>• <strong>Standard weekly:</strong> Day / Date / Project / Stage / Total Hours / Time / Description columns — the company's primary format</li>
+            <li>• <strong>Multi-day:</strong> sections separated by "Date: YYYY-MM-DD" labels</li>
+            <li>• <strong>Single-day legacy:</strong> any sheet with a date + Time / Project header row</li>
+            <li>• Supported time formats: <strong>8:00–11:30</strong>, <strong>9:00 AM – 5:00 PM</strong>, <strong>09:00 – 17:00</strong></li>
           </ul>
         </div>
 
