@@ -161,6 +161,7 @@ RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_reviewer_name TEXT;
   v_msg           TEXT;
+  v_notif_type    notification_type;
 BEGIN
   IF OLD.status = NEW.status THEN RETURN NEW; END IF;
 
@@ -168,17 +169,19 @@ BEGIN
   FROM public.profiles WHERE id = NEW.reviewer_id;
 
   IF NEW.status = 'approved' THEN
-    v_msg := 'Your timesheet for ' || TO_CHAR(NEW.date, 'Mon DD, YYYY') ||
-             ' was approved by ' || COALESCE(v_reviewer_name, 'a reviewer') || '.';
+    v_msg        := 'Your timesheet for ' || TO_CHAR(NEW.date, 'Mon DD, YYYY') ||
+                   ' was approved by ' || COALESCE(v_reviewer_name, 'a reviewer') || '.';
+    v_notif_type := 'approval';
   ELSIF NEW.status = 'rejected' THEN
-    v_msg := 'Your timesheet for ' || TO_CHAR(NEW.date, 'Mon DD, YYYY') ||
-             ' was rejected by ' || COALESCE(v_reviewer_name, 'a reviewer') ||
-             '. Reason: ' || COALESCE(NEW.rejection_reason, 'No reason provided') || '.';
+    v_msg        := 'Your timesheet for ' || TO_CHAR(NEW.date, 'Mon DD, YYYY') ||
+                   ' was rejected by ' || COALESCE(v_reviewer_name, 'a reviewer') ||
+                   '. Reason: ' || COALESCE(NEW.rejection_reason, 'No reason provided') || '.';
+    v_notif_type := 'rejection';
   END IF;
 
   IF v_msg IS NOT NULL THEN
     INSERT INTO public.notifications (user_id, type, message, timesheet_id)
-    VALUES (NEW.employee_id, NEW.status::notification_type, v_msg, NEW.id);
+    VALUES (NEW.employee_id, v_notif_type, v_msg, NEW.id);
   END IF;
 
   RETURN NEW;
