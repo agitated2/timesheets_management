@@ -1,53 +1,219 @@
 import { useCallback, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, UserX } from 'lucide-react'
+import {
+  Upload, FileSpreadsheet, CheckCircle, AlertCircle, X,
+  UserX, Calendar, Clock, ChevronDown, ChevronUp, AlertTriangle,
+} from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
+import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => {
-      const base64 = reader.result.split(',')[1]
-      resolve(base64)
-    }
+    reader.onload = () => resolve(reader.result.split(',')[1])
     reader.onerror = reject
     reader.readAsDataURL(file)
   })
 }
 
+// ── Manager gate ─────────────────────────────────────────────────
+function ManagerGate() {
+  return (
+    <div className="max-w-lg mx-auto">
+      <div className="card p-10 text-center space-y-4">
+        <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-950/30 flex items-center justify-center mx-auto">
+          <UserX size={28} className="text-amber-500" />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold mb-1">Line manager required</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            You need to assign a line manager before you can upload timesheets.
+            Your manager will receive and review your submissions.
+          </p>
+        </div>
+        <Link to="/settings" className="btn-primary mx-auto">
+          Go to Settings to assign a manager
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// ── Success screen ───────────────────────────────────────────────
+function SuccessScreen({ result, onReset, navigate }) {
+  const { days, totalDays, totalHours } = result
+  const [expandedDay, setExpandedDay] = useState(null)
+  const isMulti = totalDays > 1
+
+  return (
+    <div className="max-w-lg mx-auto space-y-6">
+      <div className="card p-8 text-center">
+        <CheckCircle size={48} className="text-emerald-500 mx-auto mb-4" />
+        <h2 className="text-xl font-bold mb-1">
+          {isMulti ? `${totalDays} timesheets submitted!` : 'Timesheet submitted!'}
+        </h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
+          Your manager has been notified and will review {isMulti ? 'them' : 'it'} shortly.
+        </p>
+
+        {/* Totals */}
+        <div className="flex items-center justify-center gap-6 bg-gray-50 dark:bg-gray-800 rounded-xl p-4 mb-5">
+          <div className="text-center">
+            <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{totalDays}</p>
+            <p className="text-xs text-gray-400">{totalDays === 1 ? 'day' : 'days'}</p>
+          </div>
+          <div className="w-px h-10 bg-gray-200 dark:bg-gray-700" />
+          <div className="text-center">
+            <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{totalHours}</p>
+            <p className="text-xs text-gray-400">total hours</p>
+          </div>
+        </div>
+
+        {/* Per-day breakdown */}
+        <div className="space-y-2 text-left mb-6">
+          {days.map((day, di) => {
+            const isOpen = expandedDay === di
+            const dateLabel = format(parseISO(day.date), isMulti ? 'EEE, MMM d, yyyy' : 'MMMM d, yyyy')
+            return (
+              <div key={day.date} className="bg-gray-50 dark:bg-gray-800 rounded-xl overflow-hidden">
+                <button
+                  onClick={() => setExpandedDay(isOpen ? null : di)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Calendar size={14} className="text-blue-500 flex-shrink-0" />
+                    <span className="text-sm font-medium">{dateLabel}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-gray-400">{day.hours}h · {day.entries.length} {day.entries.length === 1 ? 'entry' : 'entries'}</span>
+                    {isOpen ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
+                  </div>
+                </button>
+
+                {isOpen && (
+                  <div className="border-t border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-700/50">
+                    {day.entries.map((e, i) => (
+                      <div key={i} className="flex items-center justify-between px-4 py-2.5 text-sm">
+                        <div className="min-w-0">
+                          <span className="font-medium">{e.project_name || '—'}</span>
+                          {e.task && <span className="text-gray-400 ml-2 text-xs">· {e.task}</span>}
+                        </div>
+                        <span className="text-gray-400 text-xs flex-shrink-0 ml-3">
+                          {e.time_from} – {e.time_to} ({e.hours_decimal}h)
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="flex gap-3">
+          <button onClick={onReset} className="btn-secondary flex-1">Upload another</button>
+          <button onClick={() => navigate('/history')} className="btn-primary flex-1">View history</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Confirmation screen ──────────────────────────────────────────
+function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
+  const { days, totalDays, totalHours } = preview
+  const isMulti = totalDays > 1
+  const dateRange = isMulti
+    ? `${format(parseISO(days[0].date), 'MMM d')} – ${format(parseISO(days[days.length - 1].date), 'MMM d, yyyy')}`
+    : format(parseISO(days[0].date), 'MMMM d, yyyy')
+
+  return (
+    <div className="max-w-lg mx-auto space-y-5">
+      <div className="card p-6 space-y-5">
+        <div className="text-center">
+          <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center mx-auto mb-3">
+            <Calendar size={22} className="text-blue-600 dark:text-blue-400" />
+          </div>
+          <h2 className="text-lg font-semibold">Confirm submission</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            You are uploading {isMulti
+              ? <strong>timesheets for {totalDays} days</strong>
+              : <strong>a timesheet for 1 day</strong>
+            }.
+          </p>
+          {isMulti && (
+            <p className="text-xs text-gray-400 mt-0.5">{dateRange}</p>
+          )}
+        </div>
+
+        {/* Day-by-day table */}
+        <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+          <div className="grid grid-cols-3 text-xs font-semibold text-gray-400 uppercase tracking-wider px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+            <span>Date</span>
+            <span className="text-center">Entries</span>
+            <span className="text-right">Hours</span>
+          </div>
+          {days.map(d => (
+            <div key={d.date} className="grid grid-cols-3 px-4 py-2.5 text-sm border-b border-gray-100 dark:border-gray-800 last:border-0">
+              <span className="font-medium">{format(parseISO(d.date), 'EEE, MMM d')}</span>
+              <span className="text-center text-gray-500">{d.entriesCount}</span>
+              <span className="text-right text-gray-700 dark:text-gray-300">{d.hours}h</span>
+            </div>
+          ))}
+          <div className="grid grid-cols-3 px-4 py-2.5 text-sm font-semibold bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+            <span>Total</span>
+            <span className="text-center text-gray-500">{days.reduce((s, d) => s + d.entriesCount, 0)}</span>
+            <span className="text-right text-blue-600 dark:text-blue-400">{totalHours}h</span>
+          </div>
+        </div>
+
+        <p className="text-xs text-gray-400 text-center">
+          {isMulti
+            ? 'This will create one timesheet submission per day. Each day is reviewed independently.'
+            : 'Your manager will be notified to review this timesheet.'}
+        </p>
+
+        <div className="flex gap-3">
+          <button
+            onClick={onCancel}
+            disabled={confirming}
+            className="btn-secondary flex-1"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={confirming}
+            className="btn-primary flex-1"
+          >
+            {confirming ? (
+              <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Submitting…</>
+            ) : (
+              <><CheckCircle size={15} /> Confirm & Submit</>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────
 export default function UploadPage() {
   const { user, profile } = useAuth()
   const navigate = useNavigate()
 
-  // Block upload if no line manager is assigned
-  if (!profile?.manager_id) {
-    return (
-      <div className="max-w-lg mx-auto">
-        <div className="card p-10 text-center space-y-4">
-          <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-950/30 flex items-center justify-center mx-auto">
-            <UserX size={28} className="text-amber-500" />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold mb-1">Line manager required</h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              You need to assign a line manager before you can upload timesheets.
-              Your manager will receive and review your submissions.
-            </p>
-          </div>
-          <Link to="/settings" className="btn-primary mx-auto">
-            Go to Settings to assign a manager
-          </Link>
-        </div>
-      </div>
-    )
-  }
-  const [file, setFile] = useState(null)
-  const [dragging, setDragging] = useState(false)
-  const [state, setState] = useState('idle') // idle | uploading | success | error
-  const [result, setResult] = useState(null)
-  const [errorMsg, setErrorMsg] = useState('')
+  if (!profile?.manager_id) return <ManagerGate />
+
+  const [file, setFile]           = useState(null)
+  const [dragging, setDragging]   = useState(false)
+  // state: 'idle' | 'previewing' | 'confirming' | 'uploading' | 'success' | 'error'
+  const [state, setState]         = useState('idle')
+  const [previewData, setPreview] = useState(null)  // dry-run response
+  const [result, setResult]       = useState(null)  // final insert response
+  const [errorMsg, setErrorMsg]   = useState('')
 
   const accept = '.xlsx,.xls,.xlsm'
 
@@ -70,33 +236,46 @@ export default function UploadPage() {
   const onDrop = useCallback((e) => {
     e.preventDefault()
     setDragging(false)
-    const dropped = e.dataTransfer.files[0]
-    pickFile(dropped)
+    pickFile(e.dataTransfer.files[0])
   }, [])
 
-  async function handleUpload() {
+  async function callApi(isDryRun) {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) throw new Error('Not authenticated')
+    const base64 = await fileToBase64(file)
+    const res = await fetch('/.netlify/functions/parse-timesheet', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ file: base64, fileName: file.name, dryRun: isDryRun }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Upload failed')
+    return data
+  }
+
+  // Step 1: dry-run to get preview
+  async function handlePreview() {
     if (!file) return
-    setState('uploading')
+    setState('previewing')
     setErrorMsg('')
-
     try {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) throw new Error('Not authenticated')
+      const data = await callApi(true)
+      setPreview(data)
+      setState('confirming')
+    } catch (err) {
+      setErrorMsg(err.message)
+      setState('error')
+    }
+  }
 
-      const base64 = await fileToBase64(file)
-
-      const res = await fetch('/.netlify/functions/parse-timesheet', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ file: base64, fileName: file.name }),
-      })
-
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Upload failed')
-
+  // Step 2: confirmed — actual insert
+  async function handleConfirm() {
+    setState('uploading')
+    try {
+      const data = await callApi(false)
       setResult(data)
       setState('success')
     } catch (err) {
@@ -105,64 +284,49 @@ export default function UploadPage() {
     }
   }
 
+  function handleReset() {
+    setFile(null)
+    setState('idle')
+    setPreview(null)
+    setResult(null)
+    setErrorMsg('')
+  }
+
+  // ── Success ──────────────────────────────────────────────────
   if (state === 'success' && result) {
-    const { timesheet, entries } = result
+    return <SuccessScreen result={result} onReset={handleReset} navigate={navigate} />
+  }
+
+  // ── Confirmation ─────────────────────────────────────────────
+  if (state === 'confirming' && previewData) {
     return (
-      <div className="max-w-lg mx-auto space-y-6">
-        <div className="card p-8 text-center">
-          <CheckCircle size={48} className="text-emerald-500 mx-auto mb-4" />
-          <h2 className="text-xl font-bold mb-1">Timesheet submitted!</h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-            Your manager has been notified and will review it shortly.
-          </p>
-
-          <div className="text-left bg-gray-50 dark:bg-gray-800 rounded-xl p-4 mb-6 space-y-2">
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Date</span>
-              <span className="font-medium">{timesheet.date}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Total hours</span>
-              <span className="font-medium">{timesheet.total_hours}h</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Entries parsed</span>
-              <span className="font-medium">{entries.length}</span>
-            </div>
-          </div>
-
-          <div className="space-y-2 text-left mb-6">
-            <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Parsed entries</p>
-            {entries.map((e, i) => (
-              <div key={i} className="flex items-center justify-between text-sm bg-gray-50 dark:bg-gray-800 rounded-lg px-3 py-2">
-                <div>
-                  <span className="font-medium">{e.project_name || '—'}</span>
-                  {e.task && <span className="text-gray-400 ml-2 text-xs">· {e.task}</span>}
-                </div>
-                <span className="text-gray-500 text-xs">{e.time_from} – {e.time_to} ({e.hours_decimal}h)</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="flex gap-3">
-            <button onClick={() => { setFile(null); setState('idle'); setResult(null) }} className="btn-secondary flex-1">
-              Upload another
-            </button>
-            <button onClick={() => navigate('/history')} className="btn-primary flex-1">
-              View history
-            </button>
-          </div>
-        </div>
-      </div>
+      <ConfirmationScreen
+        preview={previewData}
+        onConfirm={handleConfirm}
+        onCancel={() => setState('idle')}
+        confirming={false}
+      />
     )
   }
 
+  if (state === 'uploading' && previewData) {
+    return (
+      <ConfirmationScreen
+        preview={previewData}
+        onConfirm={handleConfirm}
+        onCancel={() => setState('idle')}
+        confirming={true}
+      />
+    )
+  }
+
+  // ── Upload form (idle / previewing / error) ──────────────────
   return (
     <div className="max-w-lg mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Upload timesheet</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-          Upload your daily Excel timesheet file.
+          Upload your daily or weekly Excel timesheet file.
         </p>
       </div>
 
@@ -206,41 +370,46 @@ export default function UploadPage() {
           )}
         </div>
 
-        {/* Expected format hint */}
+        {/* AM/PM warning */}
+        <div className="flex items-start gap-2.5 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl px-4 py-3">
+          <AlertTriangle size={15} className="text-amber-500 flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
+            <strong>Time format note:</strong> Times written without AM/PM (e.g. "8:00", "9:00") are assumed
+            to be 24-hour clock. If you intended AM times, add <strong>AM</strong> or <strong>PM</strong> to
+            avoid incorrect results (e.g. "8:00 AM" or "9:00 PM").
+          </p>
+        </div>
+
+        {/* Format hint */}
         <div className="bg-blue-50 dark:bg-blue-950/20 rounded-xl p-4">
           <p className="text-xs font-semibold text-blue-700 dark:text-blue-400 mb-2">Expected file format</p>
           <ul className="text-xs text-blue-600 dark:text-blue-400 space-y-1">
-            <li>• Row near the top with a <strong>Date</strong> field (e.g. "Date: 2024-01-15")</li>
+            <li>• Each day section starts with a <strong>Date:</strong> label (e.g. "Date: 2024-01-15")</li>
             <li>• Header row: <strong>Time</strong> | <strong>Project Name</strong> | <strong>Task</strong></li>
-            <li>• Time format: <strong>9:00 - 17:00</strong>, <strong>9:00 AM to 5:00 PM</strong>, etc.</li>
+            <li>• Time format: <strong>9:00 AM – 5:00 PM</strong>, <strong>09:00 – 17:00</strong>, etc.</li>
+            <li>• Multiple day sections in one file are supported for weekly timesheets</li>
           </ul>
         </div>
 
         {errorMsg && (
           <div className="flex items-start gap-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl p-4">
             <AlertCircle size={16} className="text-red-500 flex-shrink-0 mt-0.5" />
-            <p className="text-sm text-red-700 dark:text-red-400">{errorMsg}</p>
-            <button onClick={() => setErrorMsg('')} className="ml-auto text-red-400 hover:text-red-600">
+            <p className="text-sm text-red-700 dark:text-red-400 flex-1">{errorMsg}</p>
+            <button onClick={() => setErrorMsg('')} className="text-red-400 hover:text-red-600 flex-shrink-0">
               <X size={14} />
             </button>
           </div>
         )}
 
         <button
-          onClick={handleUpload}
-          disabled={!file || state === 'uploading'}
+          onClick={handlePreview}
+          disabled={!file || state === 'previewing'}
           className="btn-primary w-full"
         >
-          {state === 'uploading' ? (
-            <>
-              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              Parsing & uploading…
-            </>
+          {state === 'previewing' ? (
+            <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Reading file…</>
           ) : (
-            <>
-              <Upload size={16} />
-              Submit timesheet
-            </>
+            <><Upload size={16} /> Submit timesheet</>
           )}
         </button>
       </div>
