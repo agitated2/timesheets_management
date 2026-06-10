@@ -257,6 +257,11 @@ DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
 CREATE POLICY "profiles_update_own" ON public.profiles
   FOR UPDATE USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
 
+-- Global analytics can read all profiles (needed to populate employee list)
+DROP POLICY IF EXISTS "profiles_read_global_analytics" ON public.profiles;
+CREATE POLICY "profiles_read_global_analytics" ON public.profiles
+  FOR SELECT USING (public.my_has_role('global_analytics'));
+
 -- IT can update any profile (role management)
 DROP POLICY IF EXISTS "profiles_update_it" ON public.profiles;
 CREATE POLICY "profiles_update_it" ON public.profiles

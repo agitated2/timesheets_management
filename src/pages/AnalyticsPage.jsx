@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
@@ -6,7 +6,7 @@ import {
   XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend
 } from 'recharts'
 import { format, subDays, eachDayOfInterval, isWeekend, parseISO } from 'date-fns'
-import { Download, Filter, BarChart2, TrendingUp } from 'lucide-react'
+import { Download, Filter, BarChart2, TrendingUp, ChevronDown, Check } from 'lucide-react'
 import clsx from 'clsx'
 
 const COLORS = ['#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899','#14B8A6','#F97316','#6366F1','#84CC16']
@@ -39,6 +39,83 @@ function StatPill({ label, value, color = 'blue' }) {
   )
 }
 
+function MultiSelectDropdown({ options, value, onChange, placeholder }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    function handle(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handle)
+    return () => document.removeEventListener('mousedown', handle)
+  }, [])
+
+  function toggle(v) {
+    onChange(value.includes(v) ? value.filter(x => x !== v) : [...value, v])
+  }
+
+  const label = value.length === 0
+    ? null
+    : value.length === 1
+      ? (options.find(o => o.value === value[0])?.label || value[0])
+      : `${value.length} selected`
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="input text-sm text-left flex items-center justify-between w-full gap-2"
+      >
+        <span className={clsx('truncate', !label && 'text-gray-400 dark:text-gray-500')}>
+          {label || placeholder}
+        </span>
+        <ChevronDown size={14} className={clsx('text-gray-400 flex-shrink-0 transition-transform duration-150', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="absolute z-20 top-full mt-1 left-0 right-0 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl overflow-hidden">
+          {options.length === 0 ? (
+            <p className="text-xs text-gray-400 text-center py-3">No options available</p>
+          ) : (
+            <div className="max-h-52 overflow-y-auto divide-y divide-gray-50 dark:divide-gray-800">
+              {options.map(opt => (
+                <label
+                  key={opt.value}
+                  className={clsx(
+                    'flex items-center gap-2.5 px-3 py-2.5 cursor-pointer transition-colors text-sm',
+                    value.includes(opt.value) ? 'bg-ae7-light/60 dark:bg-ae7-red/5' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                  )}
+                >
+                  <div className={clsx(
+                    'w-3.5 h-3.5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors',
+                    value.includes(opt.value) ? 'bg-ae7-red border-ae7-red' : 'border-gray-300 dark:border-gray-600'
+                  )}>
+                    {value.includes(opt.value) && <Check size={9} className="text-white" strokeWidth={3} />}
+                  </div>
+                  <span className="truncate">{opt.label}</span>
+                  <button
+                    type="button"
+                    onClick={e => { e.preventDefault(); toggle(opt.value) }}
+                    className="sr-only"
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+          {value.length > 0 && (
+            <button
+              type="button"
+              onClick={() => { onChange([]); setOpen(false) }}
+              className="w-full px-3 py-2 text-xs text-ae7-red hover:bg-ae7-light/40 dark:hover:bg-ae7-red/5 border-t border-gray-100 dark:border-gray-800 text-left transition-colors"
+            >
+              Clear selection
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function AnalyticsPage() {
   const { profile, hasRole } = useAuth()
   const dark = useIsDark()
@@ -49,11 +126,11 @@ export default function AnalyticsPage() {
   const [projects,  setProjects]  = useState([])
   const [allData,   setAllData]   = useState([])
 
-  const [startDate, setStartDate] = useState(format(subDays(new Date(), 30), 'yyyy-MM-dd'))
-  const [endDate,   setEndDate]   = useState(format(new Date(), 'yyyy-MM-dd'))
-  const [empFilter, setEmpFilter] = useState('')
-  const [projFilter, setProjFilter] = useState('')
-  const [loading,   setLoading]   = useState(true)
+  const [startDate,   setStartDate]   = useState(format(subDays(new Date(), 30), 'yyyy-MM-dd'))
+  const [endDate,     setEndDate]     = useState(format(new Date(), 'yyyy-MM-dd'))
+  const [empFilters,  setEmpFilters]  = useState([])
+  const [projFilters, setProjFilters] = useState([])
+  const [loading,     setLoading]     = useState(true)
 
   useEffect(() => {
     loadData()
@@ -64,7 +141,7 @@ export default function AnalyticsPage() {
     const { data } = await supabase
       .from('timesheet_entries')
       .select(`
-        id, project_name, hours_decimal,
+        id, project_name, task, time_from, time_to, hours_decimal,
         timesheets!inner (
           id, date, status, employee_id,
           profiles!employee_id ( id, full_name, email )
@@ -91,11 +168,11 @@ export default function AnalyticsPage() {
 
   const filtered = useMemo(() => {
     return allData.filter(e => {
-      if (empFilter  && e.timesheets?.profiles?.id !== empFilter)  return false
-      if (projFilter && (e.project_name || '').trim() !== projFilter) return false
+      if (empFilters.length > 0 && !empFilters.includes(e.timesheets?.profiles?.id)) return false
+      if (projFilters.length > 0 && !projFilters.includes((e.project_name || '').trim())) return false
       return true
     })
-  }, [allData, empFilter, projFilter])
+  }, [allData, empFilters, projFilters])
 
   // Hours by project
   const byProject = useMemo(() => {
@@ -142,7 +219,13 @@ export default function AnalyticsPage() {
     const interval = eachDayOfInterval({ start: parseISO(startDate), end: parseISO(endDate) })
     const weekdays = interval.filter(d => !isWeekend(d)).map(d => format(d, 'yyyy-MM-dd'))
 
-    const targetEmps = empFilter ? [empFilter] : (isGlobal ? Object.keys(submittedByEmp) : (isTeamAnalytics ? employees.map(e => e.id) : [profile.id]))
+    const targetEmps = empFilters.length > 0
+      ? empFilters
+      : isGlobal
+        ? Object.keys(submittedByEmp)
+        : isTeamAnalytics
+          ? employees.map(e => e.id)
+          : [profile.id]
 
     const missed = {}
     targetEmps.forEach(id => {
@@ -150,32 +233,27 @@ export default function AnalyticsPage() {
       missed[id] = weekdays.filter(d => !submitted.has(d)).length
     })
     return missed
-  }, [allData, startDate, endDate, empFilter, employees, isGlobal, isTeamAnalytics, profile.id])
+  }, [allData, startDate, endDate, empFilters, employees, isGlobal, isTeamAnalytics, profile.id])
 
   const totalHours = filtered.reduce((s, e) => s + (e.hours_decimal || 0), 0)
   const uniqueDays = new Set(filtered.map(e => e.timesheets?.date)).size
   const avgPerDay = uniqueDays ? totalHours / uniqueDays : 0
   const totalMissed = Object.values(missedDays).reduce((s, v) => s + v, 0)
 
-  async function downloadCSV() {
+  function downloadCSV() {
     const rows = [['Employee', 'Date', 'Project', 'Task', 'Time From', 'Time To', 'Hours']]
-    const { data } = await supabase
-      .from('timesheet_entries')
-      .select(`
-        project_name, task, time_from, time_to, hours_decimal,
-        timesheets!inner ( date, employee_id, profiles!employee_id ( full_name, email ) )
-      `)
-      .gte('timesheets.date', startDate)
-      .lte('timesheets.date', endDate)
-      .eq('timesheets.status', 'approved')
-
-    if (data) {
-      data.forEach(e => {
-        const p = e.timesheets?.profiles
-        const name = p?.full_name || p?.email || ''
-        rows.push([name, e.timesheets?.date || '', e.project_name || '', e.task || '', e.time_from || '', e.time_to || '', e.hours_decimal ?? ''])
-      })
-    }
+    filtered.forEach(e => {
+      const p = e.timesheets?.profiles
+      rows.push([
+        p?.full_name || p?.email || '',
+        e.timesheets?.date || '',
+        e.project_name || '',
+        e.task || '',
+        e.time_from || '',
+        e.time_to || '',
+        e.hours_decimal ?? '',
+      ])
+    })
     const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
@@ -185,6 +263,9 @@ export default function AnalyticsPage() {
     a.click()
     URL.revokeObjectURL(url)
   }
+
+  const empOptions  = employees.map(e => ({ value: e.id,    label: e.full_name || e.email }))
+  const projOptions = projects.map(p =>  ({ value: p,       label: p }))
 
   return (
     <div className="space-y-6">
@@ -215,19 +296,29 @@ export default function AnalyticsPage() {
           </div>
           {(isGlobal || isTeamAnalytics) && (
             <div>
-              <label className="label text-xs">Employee</label>
-              <select value={empFilter} onChange={e => setEmpFilter(e.target.value)} className="input text-sm">
-                <option value="">All employees</option>
-                {employees.map(e => <option key={e.id} value={e.id}>{e.full_name || e.email}</option>)}
-              </select>
+              <label className="label text-xs">
+                Employee
+                {empFilters.length > 0 && <span className="ml-1 text-ae7-red">{empFilters.length} selected</span>}
+              </label>
+              <MultiSelectDropdown
+                options={empOptions}
+                value={empFilters}
+                onChange={setEmpFilters}
+                placeholder="All employees"
+              />
             </div>
           )}
           <div>
-            <label className="label text-xs">Project</label>
-            <select value={projFilter} onChange={e => setProjFilter(e.target.value)} className="input text-sm">
-              <option value="">All projects</option>
-              {projects.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
+            <label className="label text-xs">
+              Project
+              {projFilters.length > 0 && <span className="ml-1 text-ae7-red">{projFilters.length} selected</span>}
+            </label>
+            <MultiSelectDropdown
+              options={projOptions}
+              value={projFilters}
+              onChange={setProjFilters}
+              placeholder="All projects"
+            />
           </div>
         </div>
       </div>
