@@ -21,8 +21,8 @@ exports.handler = async (event) => {
     const { data: { user }, error: authErr } = await supabaseAdmin.auth.getUser(token)
     if (authErr || !user) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid token' }) }
 
-    const { data: caller } = await supabaseAdmin.from('profiles').select('role').eq('id', user.id).single()
-    if (caller?.role !== 'it') return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT admin only' }) }
+    const { data: caller } = await supabaseAdmin.from('profiles').select('roles').eq('id', user.id).single()
+    if (!caller?.roles?.includes('it')) return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT admin only' }) }
 
     const { timesheetIds, userId, notify } = JSON.parse(event.body)
     if (!Array.isArray(timesheetIds) || timesheetIds.length === 0) {

@@ -18,8 +18,8 @@ export default function OnboardingPage() {
   useEffect(() => {
     supabase
       .from('profiles')
-      .select('id, full_name, email, role')
-      .in('role', ['manager', 'c_suite'])
+      .select('id, full_name, email, roles')
+      .filter('roles', 'ov', '{manager,c_suite}')
       .order('full_name')
       .then(({ data }) => setManagers(data ?? []))
   }, [])
@@ -100,7 +100,7 @@ export default function OnboardingPage() {
                     <CheckCircle size={16} className="text-emerald-500" />
                     <span className="text-sm font-medium">{selectedManager.full_name || selectedManager.email}</span>
                     <span className="text-xs text-gray-500">
-                      ({selectedManager.role === 'c_suite' ? 'C-Suite' : 'Manager'})
+                      ({(selectedManager.roles || []).includes('c_suite') ? 'C-Suite' : 'Manager'})
                     </span>
                   </div>
                   <button type="button" onClick={() => { setSelectedManager(null); setManagerSearch('') }} className="text-xs text-red-500 hover:underline">
@@ -136,7 +136,7 @@ export default function OnboardingPage() {
                           <div>
                             <p className="text-sm font-medium">{m.full_name || '(No name)'}</p>
                             <p className="text-xs text-gray-400">
-                              {m.email} · {m.role === 'c_suite' ? 'C-Suite' : 'Manager'}
+                              {m.email} · {(m.roles || []).includes('c_suite') ? 'C-Suite' : 'Manager'}
                             </p>
                           </div>
                         </button>

@@ -47,8 +47,19 @@ export function AuthProvider({ children }) {
     if (user) return fetchProfile(user.id)
   }, [user, fetchProfile])
 
+  // Returns true if the current user has the given role.
+  // Checks the roles[] array first; falls back to the single role column
+  // for profiles that pre-date the multi-role migration.
+  const hasRole = useCallback((r) => {
+    if (!profile) return false
+    if (Array.isArray(profile.roles) && profile.roles.length > 0) {
+      return profile.roles.includes(r)
+    }
+    return profile.role === r
+  }, [profile])
+
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ user, profile, loading, signOut, refreshProfile, hasRole }}>
       {children}
     </AuthContext.Provider>
   )

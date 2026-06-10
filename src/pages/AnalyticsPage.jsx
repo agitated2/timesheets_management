@@ -40,10 +40,10 @@ function StatPill({ label, value, color = 'blue' }) {
 }
 
 export default function AnalyticsPage() {
-  const { profile } = useAuth()
+  const { profile, hasRole } = useAuth()
   const dark = useIsDark()
-  const isGlobal = ['hr', 'c_suite', 'it'].includes(profile?.role)
-  const isManager = ['manager', 'c_suite'].includes(profile?.role)
+  const isGlobal = hasRole('global_analytics')
+  const isTeamAnalytics = hasRole('team_analytics') && !isGlobal
 
   const [employees, setEmployees] = useState([])
   const [projects,  setProjects]  = useState([])
@@ -142,7 +142,7 @@ export default function AnalyticsPage() {
     const interval = eachDayOfInterval({ start: parseISO(startDate), end: parseISO(endDate) })
     const weekdays = interval.filter(d => !isWeekend(d)).map(d => format(d, 'yyyy-MM-dd'))
 
-    const targetEmps = empFilter ? [empFilter] : (isGlobal ? Object.keys(submittedByEmp) : (isManager ? employees.map(e => e.id) : [profile.id]))
+    const targetEmps = empFilter ? [empFilter] : (isGlobal ? Object.keys(submittedByEmp) : (isTeamAnalytics ? employees.map(e => e.id) : [profile.id]))
 
     const missed = {}
     targetEmps.forEach(id => {
@@ -150,7 +150,7 @@ export default function AnalyticsPage() {
       missed[id] = weekdays.filter(d => !submitted.has(d)).length
     })
     return missed
-  }, [allData, startDate, endDate, empFilter, employees, isGlobal, isManager, profile.id])
+  }, [allData, startDate, endDate, empFilter, employees, isGlobal, isTeamAnalytics, profile.id])
 
   const totalHours = filtered.reduce((s, e) => s + (e.hours_decimal || 0), 0)
   const uniqueDays = new Set(filtered.map(e => e.timesheets?.date)).size
@@ -213,7 +213,7 @@ export default function AnalyticsPage() {
             <label className="label text-xs">To</label>
             <input type="date" value={endDate} min={startDate} max={format(new Date(), 'yyyy-MM-dd')} onChange={e => setEndDate(e.target.value)} className="input text-sm" />
           </div>
-          {(isGlobal || isManager) && (
+          {(isGlobal || isTeamAnalytics) && (
             <div>
               <label className="label text-xs">Employee</label>
               <select value={empFilter} onChange={e => setEmpFilter(e.target.value)} className="input text-sm">

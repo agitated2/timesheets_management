@@ -9,14 +9,26 @@ import {
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 
-const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it']
+const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics']
+
+const roleDisplay = {
+  employee:         'Employee',
+  manager:          'Manager',
+  hr:               'HR',
+  c_suite:          'C-Suite',
+  it:               'IT Admin',
+  global_analytics: 'Global Analytics',
+  team_analytics:   'Team Analytics',
+}
 
 const roleBadge = {
-  employee: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
-  manager:  'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-  hr:       'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
-  c_suite:  'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  it:       'bg-ae7-light text-ae7-red dark:bg-ae7-red/10 dark:text-red-300',
+  employee:         'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
+  manager:          'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  hr:               'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  c_suite:          'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  it:               'bg-ae7-light text-ae7-red dark:bg-ae7-red/10 dark:text-red-300',
+  global_analytics: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+  team_analytics:   'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
 }
 
 const statusBadge = {
@@ -36,21 +48,26 @@ function CreateUserModal({ onClose, onCreated }) {
   const [password, setPassword]     = useState('')
   const [confirmPw, setConfirmPw]   = useState('')
   const [fullName, setFullName]     = useState('')
-  const [role, setRole]             = useState('employee')
+  const [roles, setRoles]           = useState(['employee'])
   const [showPw, setShowPw]         = useState(false)
   const [loading, setLoading]       = useState(false)
   const [error, setError]           = useState('')
+
+  function toggleCreateRole(r) {
+    setRoles(prev => prev.includes(r) ? prev.filter(x => x !== r) : [...prev, r])
+  }
 
   async function handleCreate(e) {
     e.preventDefault()
     setError('')
     if (password !== confirmPw) { setError('Passwords do not match.'); return }
+    if (roles.length === 0) { setError('Select at least one role.'); return }
     setLoading(true)
     const session = await getSession()
     const res = await fetch('/.netlify/functions/create-user', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), role }),
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles }),
     })
     const json = await res.json()
     setLoading(false)
@@ -82,10 +99,23 @@ function CreateUserModal({ onClose, onCreated }) {
           <input type={showPw ? 'text' : 'password'} value={confirmPw} onChange={e => setConfirmPw(e.target.value)} className="input" placeholder="Repeat password" required />
         </Field>
 
-        <Field label="Initial role">
-          <select value={role} onChange={e => setRole(e.target.value)} className={clsx('input text-sm font-medium', roleBadge[role])}>
-            {ROLES.map(r => <option key={r} value={r}>{r.replace('_', '-')}</option>)}
-          </select>
+        <Field label="Initial roles">
+          <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden divide-y divide-gray-100 dark:divide-gray-800 max-h-52 overflow-y-auto">
+            {ROLES.map(r => (
+              <label
+                key={r}
+                className={clsx(
+                  'flex items-center gap-3 px-4 py-2 cursor-pointer transition-colors',
+                  roles.includes(r) ? 'bg-ae7-light/60 dark:bg-ae7-red/5' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                )}
+              >
+                <Checkbox checked={roles.includes(r)} onChange={() => toggleCreateRole(r)} />
+                <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full', roleBadge[r])}>
+                  {roleDisplay[r]}
+                </span>
+              </label>
+            ))}
+          </div>
         </Field>
 
         <ErrorBox msg={error} />
@@ -103,9 +133,10 @@ function CreateUserModal({ onClose, onCreated }) {
 
 // ── Edit User Modal ────────────────────────────────────────────────
 function EditUserModal({ user: target, onClose, onSaved }) {
+  const targetRoles               = target.roles || (target.role ? [target.role] : ['employee'])
   const [email, setEmail]         = useState(target.email || '')
   const [fullName, setFullName]   = useState(target.full_name || '')
-  const [role, setRole]           = useState(target.role || 'employee')
+  const [roles, setRoles]         = useState(targetRoles)
   const [managerId, setManagerId] = useState(target.manager_id || '')
   const [newPassword, setNewPw]   = useState('')
   const [showPw, setShowPw]       = useState(false)
@@ -113,17 +144,22 @@ function EditUserModal({ user: target, onClose, onSaved }) {
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState('')
 
+  function toggleEditRole(r) {
+    setRoles(prev => prev.includes(r) ? prev.filter(x => x !== r) : [...prev, r])
+  }
+
   useEffect(() => {
     supabase
       .from('profiles')
       .select('id, full_name, email')
-      .in('role', ['manager', 'c_suite'])
+      .filter('roles', 'ov', '{manager,c_suite}')
       .order('full_name')
       .then(({ data }) => { if (data) setManagers(data) })
   }, [])
 
   async function handleSave(e) {
     e.preventDefault()
+    if (roles.length === 0) { setError('Select at least one role.'); return }
     if (newPassword && newPassword.length < 6) { setError('New password must be at least 6 characters.'); return }
     setError('')
     setLoading(true)
@@ -132,7 +168,7 @@ function EditUserModal({ user: target, onClose, onSaved }) {
     const body = { userId: target.id }
     if (email.trim().toLowerCase() !== target.email) body.email = email.trim().toLowerCase()
     if (fullName.trim() !== (target.full_name || ''))  body.fullName  = fullName.trim()
-    if (role !== target.role)                           body.role      = role
+    if (JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort())) body.roles = roles
     if (managerId !== (target.manager_id || ''))        body.managerId = managerId || null
     if (newPassword)                                    body.newPassword = newPassword
 
@@ -144,7 +180,7 @@ function EditUserModal({ user: target, onClose, onSaved }) {
     const json = await res.json()
     setLoading(false)
     if (!res.ok) { setError(json.error); return }
-    onSaved({ ...target, email: body.email ?? target.email, full_name: body.fullName ?? target.full_name, role: body.role ?? target.role, manager_id: body.managerId !== undefined ? body.managerId : target.manager_id })
+    onSaved({ ...target, email: body.email ?? target.email, full_name: body.fullName ?? target.full_name, roles: body.roles ?? target.roles, manager_id: body.managerId !== undefined ? body.managerId : target.manager_id })
     onClose()
   }
 
@@ -159,10 +195,23 @@ function EditUserModal({ user: target, onClose, onSaved }) {
           <input type="text" value={fullName} onChange={e => setFullName(e.target.value)} className="input" placeholder="Jane Smith" />
         </Field>
 
-        <Field label="Role">
-          <select value={role} onChange={e => setRole(e.target.value)} className={clsx('input text-sm font-medium', roleBadge[role])}>
-            {ROLES.map(r => <option key={r} value={r}>{r.replace('_', '-')}</option>)}
-          </select>
+        <Field label="Roles">
+          <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden divide-y divide-gray-100 dark:divide-gray-800 max-h-52 overflow-y-auto">
+            {ROLES.map(r => (
+              <label
+                key={r}
+                className={clsx(
+                  'flex items-center gap-3 px-4 py-2 cursor-pointer transition-colors',
+                  roles.includes(r) ? 'bg-ae7-light/60 dark:bg-ae7-red/5' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                )}
+              >
+                <Checkbox checked={roles.includes(r)} onChange={() => toggleEditRole(r)} />
+                <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full', roleBadge[r])}>
+                  {roleDisplay[r]}
+                </span>
+              </label>
+            ))}
+          </div>
         </Field>
 
         <Field label="Line manager">
@@ -528,11 +577,13 @@ export default function AdminPage() {
                         </div>
                       </div>
 
-                      {/* Role */}
-                      <div className="sm:col-span-2 flex-shrink-0">
-                        <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full', roleBadge[u.role])}>
-                          {u.role.replace('_', '-')}
-                        </span>
+                      {/* Roles */}
+                      <div className="sm:col-span-2 flex flex-wrap gap-1 flex-shrink-0">
+                        {(u.roles || (u.role ? [u.role] : [])).map(r => (
+                          <span key={r} className={clsx('text-xs font-medium px-2 py-0.5 rounded-full', roleBadge[r] || roleBadge.employee)}>
+                            {roleDisplay[r] || r}
+                          </span>
+                        ))}
                       </div>
 
                       {/* Joined */}

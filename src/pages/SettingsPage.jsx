@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
-  User, Shield, Search, CheckCircle, ChevronDown,
+  User, Shield, Search, CheckCircle,
   Save, Info, Users, AlertCircle, Lock, Eye, EyeOff
 } from 'lucide-react'
 import { format } from 'date-fns'
@@ -11,30 +11,36 @@ import clsx from 'clsx'
 // ----------------------------------------------------------------
 // Role config
 // ----------------------------------------------------------------
-const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it']
+const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics']
 
 const roleDisplay = {
-  employee: 'Employee',
-  manager:  'Manager',
-  hr:       'HR',
-  c_suite:  'C-Suite',
-  it:       'IT Admin',
+  employee:         'Employee',
+  manager:          'Manager',
+  hr:               'HR',
+  c_suite:          'C-Suite',
+  it:               'IT Admin',
+  global_analytics: 'Global Analytics',
+  team_analytics:   'Team Analytics',
 }
 
 const roleBadge = {
-  employee: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
-  manager:  'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-  hr:       'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
-  c_suite:  'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  it:       'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  employee:         'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
+  manager:          'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  hr:               'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  c_suite:          'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  it:               'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  global_analytics: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+  team_analytics:   'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
 }
 
 const roleDescription = {
-  employee: 'Can upload timesheets and view their own history.',
-  manager:  'Can approve/reject subordinates\' timesheets and view team analytics.',
-  hr:       'Universal read access, global analytics, and file downloads.',
-  c_suite:  'Universal read access + acts as a line manager for approval workflows.',
-  it:       'Full override access including manual approval of any timesheet.',
+  employee:         'Can upload timesheets and view their own history.',
+  manager:          'Can approve/reject timesheets for employees who chose them as manager.',
+  hr:               'Universal read access and file downloads.',
+  c_suite:          'Universal read access + acts as a line manager for approval workflows.',
+  it:               'Full override access including manual approval of any timesheet.',
+  global_analytics: 'Can view analytics and reports for all employees across the organization.',
+  team_analytics:   'Can view analytics for employees who have chosen them as their manager.',
 }
 
 // ----------------------------------------------------------------
@@ -67,14 +73,15 @@ function ProfileSection({ profile, refreshProfile }) {
   const [saving, setSaving]     = useState(false)
   const [saved, setSaved]       = useState(false)
 
-  const isEmployee = profile.role === 'employee'
+  const isEmployee = Array.isArray(profile.roles) ? profile.roles.includes('employee') : profile.role === 'employee'
+  const isIT = Array.isArray(profile.roles) ? profile.roles.includes('it') : profile.role === 'it'
 
   useEffect(() => {
     if (!isEmployee) return
     supabase
       .from('profiles')
-      .select('id, full_name, email, role')
-      .in('role', ['manager', 'c_suite'])
+      .select('id, full_name, email, roles')
+      .filter('roles', 'ov', '{manager,c_suite}')
       .order('full_name')
       .then(({ data }) => { if (data) setManagers(data) })
   }, [isEmployee])
@@ -98,17 +105,23 @@ function ProfileSection({ profile, refreshProfile }) {
 
       <form onSubmit={save} className="space-y-4">
         {/* Read-only account info */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className={clsx('grid grid-cols-1 gap-3', isIT ? 'sm:grid-cols-3' : 'sm:grid-cols-2')}>
           <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
             <p className="text-xs text-gray-400 mb-0.5">Email</p>
             <p className="text-sm font-medium truncate">{profile.email}</p>
           </div>
-          <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
-            <p className="text-xs text-gray-400 mb-0.5">Role</p>
-            <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full', roleBadge[profile.role])}>
-              {roleDisplay[profile.role]}
-            </span>
-          </div>
+          {isIT && (
+            <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
+              <p className="text-xs text-gray-400 mb-0.5">Roles</p>
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {(profile.roles || [profile.role]).map(r => (
+                  <span key={r} className={clsx('text-xs font-medium px-2 py-0.5 rounded-full', roleBadge[r] || 'bg-gray-100 text-gray-600')}>
+                    {roleDisplay[r] || r}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
             <p className="text-xs text-gray-400 mb-0.5">Member since</p>
             <p className="text-sm font-medium">{format(new Date(profile.created_at), 'MMM d, yyyy')}</p>
@@ -272,7 +285,7 @@ function RoleManagementSection() {
   useEffect(() => {
     supabase
       .from('profiles')
-      .select('id, email, full_name, role, created_at, onboarding_complete')
+      .select('id, email, full_name, role, roles, created_at, onboarding_complete')
       .order('created_at', { ascending: false })
       .then(({ data }) => { if (data) setUsers(data); setLoading(false) })
   }, [])
@@ -282,22 +295,27 @@ function RoleManagementSection() {
     setTimeout(() => setToast({ msg: '', type: 'info' }), 2800)
   }
 
-  function stagePendingRole(userId, newRole) {
-    setPending(p => ({ ...p, [userId]: newRole }))
+  function togglePendingRole(userId, role) {
+    const base = users.find(u => u.id === userId)
+    const currentRoles = pending[userId] ?? (base?.roles || (base?.role ? [base.role] : []))
+    const newRoles = currentRoles.includes(role)
+      ? currentRoles.filter(r => r !== role)
+      : [...currentRoles, role]
+    setPending(p => ({ ...p, [userId]: newRoles }))
   }
 
-  async function saveRole(userId) {
-    const newRole = pending[userId]
-    if (!newRole) return
+  async function saveRoles(userId) {
+    const newRoles = pending[userId]
+    if (!newRoles) return
     setSaving(s => ({ ...s, [userId]: true }))
-    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId)
+    const { error } = await supabase.from('profiles').update({ roles: newRoles }).eq('id', userId)
     setSaving(s => ({ ...s, [userId]: false }))
     if (error) {
-      showToast('Failed to update role: ' + error.message, 'error')
+      showToast('Failed to update roles: ' + error.message, 'error')
     } else {
-      setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u))
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, roles: newRoles } : u))
       setPending(p => { const n = { ...p }; delete n[userId]; return n })
-      showToast(`Role updated to ${roleDisplay[newRole]}.`, 'success')
+      showToast('Roles updated.', 'success')
     }
   }
 
@@ -347,17 +365,17 @@ function RoleManagementSection() {
       ) : (
         <div className="divide-y divide-gray-100 dark:divide-gray-800">
           {shown.map(u => {
-            const effectiveRole = pending[u.id] ?? u.role
+            const effectiveRoles = pending[u.id] ?? (u.roles || [u.role])
             const hasChange = !!pending[u.id]
             const isSelf = u.id === currentUser.id
 
             return (
               <div key={u.id} className={clsx(
-                'flex flex-col sm:flex-row sm:items-center gap-3 px-6 py-4 transition-colors',
+                'flex flex-col gap-3 px-6 py-4 transition-colors',
                 hasChange && 'bg-amber-50/40 dark:bg-amber-950/10'
               )}>
                 {/* User info */}
-                <div className="flex items-center gap-3 flex-1 min-w-0">
+                <div className="flex items-center gap-3 min-w-0">
                   <div className="w-9 h-9 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 text-sm font-semibold flex-shrink-0">
                     {(u.full_name || u.email || '?')[0].toUpperCase()}
                   </div>
@@ -375,38 +393,40 @@ function RoleManagementSection() {
                   </div>
                 </div>
 
-                {/* Role selector + actions */}
-                <div className="flex items-center gap-2 flex-shrink-0 sm:ml-auto">
+                {/* Role pills + actions */}
+                <div className="flex flex-col gap-2">
                   {hasChange && (
-                    <AlertCircle size={15} className="text-amber-500 flex-shrink-0" title="Unsaved change" />
+                    <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                      <AlertCircle size={12} />
+                      <span>Unsaved changes</span>
+                    </div>
                   )}
-
-                  <div className="relative">
-                    <select
-                      value={effectiveRole}
-                      disabled={isSelf}
-                      onChange={e => stagePendingRole(u.id, e.target.value)}
-                      className={clsx(
-                        'appearance-none text-xs font-medium pl-3 pr-7 py-2 rounded-xl border transition-colors cursor-pointer',
-                        'focus:outline-none focus:ring-2 focus:ring-blue-500',
-                        isSelf
-                          ? 'opacity-50 cursor-not-allowed bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700'
-                          : hasChange
-                          ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300'
-                          : clsx(roleBadge[effectiveRole], 'border-transparent')
-                      )}
-                    >
-                      {ROLES.map(r => (
-                        <option key={r} value={r}>{roleDisplay[r]}</option>
-                      ))}
-                    </select>
-                    <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-current opacity-60" />
+                  <div className="flex flex-wrap gap-1.5">
+                    {ROLES.map(r => {
+                      const active = effectiveRoles.includes(r)
+                      return (
+                        <button
+                          key={r}
+                          type="button"
+                          disabled={isSelf}
+                          onClick={() => togglePendingRole(u.id, r)}
+                          className={clsx(
+                            'text-xs font-medium px-2.5 py-1 rounded-full border transition-colors',
+                            active
+                              ? clsx(roleBadge[r], 'border-transparent')
+                              : 'border-gray-200 dark:border-gray-600 text-gray-400 dark:text-gray-500 hover:border-ae7-red/50 hover:text-gray-600 dark:hover:text-gray-300',
+                            isSelf && 'opacity-50 cursor-not-allowed pointer-events-none'
+                          )}
+                        >
+                          {roleDisplay[r]}
+                        </button>
+                      )
+                    })}
                   </div>
-
                   {hasChange && !isSelf && (
-                    <>
+                    <div className="flex items-center gap-2">
                       <button
-                        onClick={() => saveRole(u.id)}
+                        onClick={() => saveRoles(u.id)}
                         disabled={saving[u.id]}
                         className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-50"
                       >
@@ -418,7 +438,7 @@ function RoleManagementSection() {
                       >
                         Cancel
                       </button>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>
@@ -452,7 +472,7 @@ function RoleManagementSection() {
 // ----------------------------------------------------------------
 export default function SettingsPage() {
   const { profile, refreshProfile } = useAuth()
-  const isIT = profile?.role === 'it'
+  const isIT = Array.isArray(profile?.roles) ? profile.roles.includes('it') : profile?.role === 'it'
 
   return (
     <div className="max-w-3xl space-y-6">

@@ -187,6 +187,7 @@ function ManagerDashboard({ profile }) {
 
 // ---- HR / C-Suite / IT dashboard ----
 function GlobalDashboard({ profile }) {
+  const { hasRole } = useAuth()
   const [stats, setStats] = useState({ total: 0, pending: 0, approved: 0, employees: 0 })
   const [recent, setRecent] = useState([])
   const [loading, setLoading] = useState(true)
@@ -200,7 +201,7 @@ function GlobalDashboard({ profile }) {
           .gte('date', since)
           .order('created_at', { ascending: false })
           .limit(50),
-        supabase.from('profiles').select('id', { count: 'exact' }).eq('role', 'employee'),
+        supabase.from('profiles').select('id', { count: 'exact' }).filter('roles', 'cs', '{employee}'),
       ])
       if (sheets) {
         setRecent(sheets.slice(0, 8))
@@ -229,7 +230,7 @@ function GlobalDashboard({ profile }) {
 
       <div className="flex gap-3 flex-wrap">
         <Link to="/analytics" className="btn-primary"><TrendingUp size={16} /> Open analytics</Link>
-        {profile.role === 'it' && <Link to="/admin" className="btn-secondary"><AlertCircle size={16} /> Admin panel</Link>}
+        {hasRole('it') && <Link to="/admin" className="btn-secondary"><AlertCircle size={16} /> Admin panel</Link>}
       </div>
 
       <div className="card overflow-hidden">
@@ -267,9 +268,10 @@ function greeting() {
 }
 
 export default function DashboardPage() {
-  const { profile } = useAuth()
+  const { profile, hasRole } = useAuth()
   if (!profile) return null
-  if (profile.role === 'employee') return <EmployeeDashboard profile={profile} />
-  if (['manager', 'c_suite'].includes(profile.role)) return <ManagerDashboard profile={profile} />
+  if (hasRole('it') || hasRole('hr') || hasRole('c_suite')) return <GlobalDashboard profile={profile} />
+  if (hasRole('manager')) return <ManagerDashboard profile={profile} />
+  if (hasRole('employee')) return <EmployeeDashboard profile={profile} />
   return <GlobalDashboard profile={profile} />
 }

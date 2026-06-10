@@ -60,6 +60,7 @@ exports.handler = async (event) => {
         date: d.date,
         entriesCount: d.entries.length,
         hours: round2(d.entries.reduce((s, e) => s + (e.hours_decimal || 0), 0)),
+        entries: d.entries,
       }))
       return {
         statusCode: 200,

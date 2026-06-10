@@ -52,44 +52,29 @@ function NavItem({ to, icon: Icon, label, onClick }) {
   )
 }
 
-function navLinks(role) {
-  const links = [{ to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' }]
+export default function Navbar() {
+  const { profile, signOut, hasRole } = useAuth()
+  const { isDark, toggle }            = useTheme()
+  const navigate                      = useNavigate()
+  const [mobileOpen, setMobileOpen]   = useState(false)
 
-  if (role === 'employee') {
+  const links = [{ to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' }]
+  if (hasRole('employee')) {
     links.push(
       { to: '/upload',  icon: Upload,      label: 'Upload Timesheet' },
       { to: '/history', icon: Clock,       label: 'My History' },
     )
   }
-
-  if (['manager', 'c_suite'].includes(role)) {
-    links.push(
-      { to: '/reviews',   icon: CheckSquare, label: 'Reviews' },
-      { to: '/analytics', icon: BarChart2,   label: 'Analytics' },
-    )
+  if (hasRole('manager') || hasRole('c_suite')) {
+    links.push({ to: '/reviews', icon: CheckSquare, label: 'Reviews' })
   }
-
-  if (['hr', 'it'].includes(role)) {
+  if (hasRole('global_analytics') || hasRole('team_analytics')) {
     links.push({ to: '/analytics', icon: BarChart2, label: 'Analytics' })
   }
-
-  if (role === 'it') {
+  if (hasRole('it')) {
     links.push({ to: '/admin', icon: Shield, label: 'IT Admin' })
   }
-
   links.push({ to: '/settings', icon: Settings, label: 'Settings' })
-
-  return links
-}
-
-export default function Navbar() {
-  const { profile, signOut } = useAuth()
-  const { isDark, toggle }   = useTheme()
-  const navigate             = useNavigate()
-  const [mobileOpen, setMobileOpen] = useState(false)
-
-  const role  = profile?.role ?? 'employee'
-  const links = navLinks(role)
 
   const handleSignOut = async () => {
     await signOut()
@@ -111,9 +96,11 @@ export default function Navbar() {
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">{profile?.full_name || profile?.email}</p>
-            <span className={clsx('text-xs px-2 py-0.5 rounded-full font-medium', roleBadgeColor[role])}>
-              {roleLabel[role]}
-            </span>
+            {hasRole('it') && (
+              <span className={clsx('text-xs px-2 py-0.5 rounded-full font-medium', roleBadgeColor['it'])}>
+                IT Admin
+              </span>
+            )}
           </div>
         </div>
       </div>

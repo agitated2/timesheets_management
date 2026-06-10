@@ -17,8 +17,8 @@ import SettingsPage from './pages/SettingsPage'
 import AuthCallback from './pages/AuthCallback'
 
 function RoleGate({ allow, children }) {
-  const { profile } = useAuth()
-  if (!profile || !allow.includes(profile.role)) {
+  const { profile, hasRole } = useAuth()
+  if (!profile || !allow.some(r => hasRole(r))) {
     return <Navigate to="/dashboard" replace />
   }
   return children
@@ -47,8 +47,8 @@ function AppRoutes() {
           <Route path="/reviews"     element={<RoleGate allow={['manager','c_suite','it']}><ReviewsPage /></RoleGate>} />
           <Route path="/review/:id"  element={<ReviewPage />} />
 
-          {/* Analytics — all elevated roles */}
-          <Route path="/analytics"   element={<RoleGate allow={['manager','c_suite','hr','it']}><AnalyticsPage /></RoleGate>} />
+          {/* Analytics — dedicated analytics roles */}
+          <Route path="/analytics"   element={<RoleGate allow={['global_analytics','team_analytics']}><AnalyticsPage /></RoleGate>} />
 
           {/* Settings — all roles; IT gets extra role-management section */}
           <Route path="/settings"    element={<SettingsPage />} />

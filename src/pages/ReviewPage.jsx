@@ -11,7 +11,7 @@ import clsx from 'clsx'
 
 export default function ReviewPage() {
   const { id } = useParams()
-  const { profile } = useAuth()
+  const { profile, hasRole } = useAuth()
   const navigate = useNavigate()
   const [ts, setTs] = useState(null)
   const [employee, setEmployee] = useState(null)
@@ -22,7 +22,7 @@ export default function ReviewPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const canReview = ['manager', 'c_suite', 'it'].includes(profile?.role)
+  const canReview = hasRole('manager') || hasRole('c_suite') || hasRole('it')
 
   useEffect(() => {
     async function load() {

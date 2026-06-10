@@ -1,11 +1,12 @@
 -- =============================================================
 -- Timesheet Management — Supabase Schema
--- Run this entire file in the Supabase SQL editor.
+-- Run this entire file in the Supabase SQL editor (fresh install).
+-- For existing databases, run migration_v2_multi_role.sql instead.
 -- After running, also:
 --   1. Create a private storage bucket named: timesheet-files
 --   2. Enable Realtime for the `notifications` table in the Supabase dashboard
---   3. Set the first IT/admin user's role manually:
---      UPDATE public.profiles SET role = 'it' WHERE email = 'admin@yourcompany.com';
+--   3. Set the first IT/admin user's roles manually:
+--      UPDATE public.profiles SET roles = '{it}' WHERE email = 'admin@yourcompany.com';
 -- =============================================================
 
 -- Extensions
@@ -13,7 +14,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Custom types
 DO $$ BEGIN
-  CREATE TYPE user_role AS ENUM ('employee', 'manager', 'hr', 'c_suite', 'it');
+  CREATE TYPE user_role AS ENUM ('employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics');
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 DO $$ BEGIN
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   id              UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email           TEXT NOT NULL,
   full_name       TEXT,
-  role            user_role NOT NULL DEFAULT 'employee',
+  role            user_role NOT NULL DEFAULT 'employee',   -- legacy; kept for fallback
+  roles           user_role[] NOT NULL DEFAULT '{}',       -- primary multi-role array
   manager_id      UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   onboarding_complete BOOLEAN NOT NULL DEFAULT false,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -202,10 +204,17 @@ ALTER TABLE public.timesheets        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.timesheet_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notifications     ENABLE ROW LEVEL SECURITY;
 
--- Helper: get current user's role (cached per transaction)
-CREATE OR REPLACE FUNCTION public.my_role()
-RETURNS user_role LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT role FROM public.profiles WHERE id = auth.uid();
+-- Helper: check if current user has a given role (checks roles array, falls back to legacy column)
+CREATE OR REPLACE FUNCTION public.my_has_role(r user_role)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid()
+    AND (
+      (cardinality(roles) > 0 AND r = ANY(roles))
+      OR (cardinality(roles) = 0 AND role = r)
+    )
+  );
 $$;
 
 -- Helper: check if current user manages given employee
@@ -218,11 +227,12 @@ $$;
 
 -- ---- PROFILES ----
 
--- All authenticated users can see manager/c_suite profiles (for onboarding dropdown)
+-- All authenticated users can see manager/c_suite profiles (for onboarding + settings dropdown)
 DROP POLICY IF EXISTS "profiles_read_for_manager_select" ON public.profiles;
 CREATE POLICY "profiles_read_for_manager_select" ON public.profiles
   FOR SELECT USING (
-    auth.uid() IS NOT NULL AND role IN ('manager', 'c_suite')
+    auth.uid() IS NOT NULL
+    AND ('manager' = ANY(roles) OR 'c_suite' = ANY(roles))
   );
 
 -- Users can read their own profile
@@ -238,7 +248,9 @@ CREATE POLICY "profiles_read_subordinates" ON public.profiles
 -- HR/C-Suite/IT can read all profiles
 DROP POLICY IF EXISTS "profiles_read_privileged" ON public.profiles;
 CREATE POLICY "profiles_read_privileged" ON public.profiles
-  FOR SELECT USING (public.my_role() IN ('hr', 'c_suite', 'it'));
+  FOR SELECT USING (
+    public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it')
+  );
 
 -- Users can update their own profile
 DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
@@ -248,45 +260,61 @@ CREATE POLICY "profiles_update_own" ON public.profiles
 -- IT can update any profile (role management)
 DROP POLICY IF EXISTS "profiles_update_it" ON public.profiles;
 CREATE POLICY "profiles_update_it" ON public.profiles
-  FOR UPDATE USING (public.my_role() = 'it');
+  FOR UPDATE USING (public.my_has_role('it'));
 
 -- ---- TIMESHEETS ----
 
-DROP POLICY IF EXISTS "timesheets_read_own"        ON public.timesheets;
-DROP POLICY IF EXISTS "timesheets_read_manager"    ON public.timesheets;
-DROP POLICY IF EXISTS "timesheets_read_privileged" ON public.timesheets;
-DROP POLICY IF EXISTS "timesheets_insert_own"      ON public.timesheets;
-DROP POLICY IF EXISTS "timesheets_update_manager"  ON public.timesheets;
-DROP POLICY IF EXISTS "timesheets_update_it"       ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_read_own"              ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_read_manager"          ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_read_privileged"       ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_read_global_analytics" ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_read_team_analytics"   ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_insert_own"            ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_update_manager"        ON public.timesheets;
+DROP POLICY IF EXISTS "timesheets_update_it"             ON public.timesheets;
 
 CREATE POLICY "timesheets_read_own" ON public.timesheets
   FOR SELECT USING (auth.uid() = employee_id);
 
 CREATE POLICY "timesheets_read_manager" ON public.timesheets
   FOR SELECT USING (
-    public.my_role() IN ('manager', 'c_suite') AND public.i_manage(employee_id)
+    (public.my_has_role('manager') OR public.my_has_role('c_suite'))
+    AND public.i_manage(employee_id)
   );
 
 CREATE POLICY "timesheets_read_privileged" ON public.timesheets
-  FOR SELECT USING (public.my_role() IN ('hr', 'c_suite', 'it'));
+  FOR SELECT USING (
+    public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it')
+  );
+
+CREATE POLICY "timesheets_read_global_analytics" ON public.timesheets
+  FOR SELECT USING (public.my_has_role('global_analytics'));
+
+CREATE POLICY "timesheets_read_team_analytics" ON public.timesheets
+  FOR SELECT USING (
+    public.my_has_role('team_analytics') AND public.i_manage(employee_id)
+  );
 
 CREATE POLICY "timesheets_insert_own" ON public.timesheets
   FOR INSERT WITH CHECK (auth.uid() = employee_id);
 
 CREATE POLICY "timesheets_update_manager" ON public.timesheets
   FOR UPDATE USING (
-    public.my_role() IN ('manager', 'c_suite') AND public.i_manage(employee_id)
+    (public.my_has_role('manager') OR public.my_has_role('c_suite'))
+    AND public.i_manage(employee_id)
   );
 
 CREATE POLICY "timesheets_update_it" ON public.timesheets
-  FOR UPDATE USING (public.my_role() = 'it');
+  FOR UPDATE USING (public.my_has_role('it'));
 
 -- ---- TIMESHEET_ENTRIES ----
 
-DROP POLICY IF EXISTS "entries_read_own"        ON public.timesheet_entries;
-DROP POLICY IF EXISTS "entries_read_manager"    ON public.timesheet_entries;
-DROP POLICY IF EXISTS "entries_read_privileged" ON public.timesheet_entries;
-DROP POLICY IF EXISTS "entries_insert_own"      ON public.timesheet_entries;
+DROP POLICY IF EXISTS "entries_read_own"              ON public.timesheet_entries;
+DROP POLICY IF EXISTS "entries_read_manager"          ON public.timesheet_entries;
+DROP POLICY IF EXISTS "entries_read_privileged"       ON public.timesheet_entries;
+DROP POLICY IF EXISTS "entries_read_global_analytics" ON public.timesheet_entries;
+DROP POLICY IF EXISTS "entries_read_team_analytics"   ON public.timesheet_entries;
+DROP POLICY IF EXISTS "entries_insert_own"            ON public.timesheet_entries;
 
 CREATE POLICY "entries_read_own" ON public.timesheet_entries
   FOR SELECT USING (
@@ -295,7 +323,7 @@ CREATE POLICY "entries_read_own" ON public.timesheet_entries
 
 CREATE POLICY "entries_read_manager" ON public.timesheet_entries
   FOR SELECT USING (
-    public.my_role() IN ('manager', 'c_suite')
+    (public.my_has_role('manager') OR public.my_has_role('c_suite'))
     AND timesheet_id IN (
       SELECT t.id FROM public.timesheets t
       WHERE public.i_manage(t.employee_id)
@@ -303,7 +331,21 @@ CREATE POLICY "entries_read_manager" ON public.timesheet_entries
   );
 
 CREATE POLICY "entries_read_privileged" ON public.timesheet_entries
-  FOR SELECT USING (public.my_role() IN ('hr', 'c_suite', 'it'));
+  FOR SELECT USING (
+    public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it')
+  );
+
+CREATE POLICY "entries_read_global_analytics" ON public.timesheet_entries
+  FOR SELECT USING (public.my_has_role('global_analytics'));
+
+CREATE POLICY "entries_read_team_analytics" ON public.timesheet_entries
+  FOR SELECT USING (
+    public.my_has_role('team_analytics')
+    AND timesheet_id IN (
+      SELECT t.id FROM public.timesheets t
+      WHERE public.i_manage(t.employee_id)
+    )
+  );
 
 CREATE POLICY "entries_insert_own" ON public.timesheet_entries
   FOR INSERT WITH CHECK (

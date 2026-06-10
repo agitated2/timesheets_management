@@ -23,10 +23,10 @@ exports.handler = async (event) => {
     if (authErr || !caller) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) }
 
     const { data: callerProfile } = await supabaseAdmin
-      .from('profiles').select('role').eq('id', caller.id).single()
-    if (callerProfile?.role !== 'it') return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT role required' }) }
+      .from('profiles').select('roles').eq('id', caller.id).single()
+    if (!callerProfile?.roles?.includes('it')) return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT role required' }) }
 
-    const { email, password, fullName, role } = JSON.parse(event.body || '{}')
+    const { email, password, fullName, roles } = JSON.parse(event.body || '{}')
 
     if (!email?.trim()) return { statusCode: 400, headers, body: JSON.stringify({ error: 'Email is required' }) }
     if (!password || password.length < 6) return { statusCode: 400, headers, body: JSON.stringify({ error: 'Password must be at least 6 characters' }) }
@@ -43,7 +43,7 @@ exports.handler = async (event) => {
     // Update name and/or role if provided.
     const profileUpdates = {}
     if (fullName?.trim()) profileUpdates.full_name = fullName.trim()
-    if (role && role !== 'employee') profileUpdates.role = role
+    if (Array.isArray(roles) && roles.length > 0) profileUpdates.roles = roles
 
     if (Object.keys(profileUpdates).length > 0) {
       await supabaseAdmin.from('profiles').update(profileUpdates).eq('id', data.user.id)

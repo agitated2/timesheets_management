@@ -21,10 +21,10 @@ exports.handler = async (event) => {
     const { data: { user }, error: authErr } = await supabaseAdmin.auth.getUser(token)
     if (authErr || !user) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid token' }) }
 
-    const { data: caller } = await supabaseAdmin.from('profiles').select('role').eq('id', user.id).single()
-    if (caller?.role !== 'it') return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT admin only' }) }
+    const { data: caller } = await supabaseAdmin.from('profiles').select('roles').eq('id', user.id).single()
+    if (!caller?.roles?.includes('it')) return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT admin only' }) }
 
-    const { userId, email, fullName, managerId, role, newPassword } = JSON.parse(event.body)
+    const { userId, email, fullName, managerId, roles, newPassword } = JSON.parse(event.body)
     if (!userId) return { statusCode: 400, headers, body: JSON.stringify({ error: 'userId required' }) }
 
     // ── Auth-level updates (email / password) ──────────────────
@@ -42,7 +42,7 @@ exports.handler = async (event) => {
     if (email !== undefined)     profileUpdate.email      = email.trim().toLowerCase()
     if (fullName !== undefined)  profileUpdate.full_name  = fullName.trim() || null
     if (managerId !== undefined) profileUpdate.manager_id = managerId || null
-    if (role !== undefined)      profileUpdate.role       = role
+    if (roles !== undefined)     profileUpdate.roles      = roles
 
     if (Object.keys(profileUpdate).length > 0) {
       const { error: prErr } = await supabaseAdmin

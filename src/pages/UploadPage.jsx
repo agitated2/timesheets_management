@@ -124,6 +124,7 @@ function SuccessScreen({ result, onReset, navigate }) {
 // ── Confirmation screen ──────────────────────────────────────────
 function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
   const { days, totalDays, totalHours, discrepancies = [], hasDiscrepancies = false } = preview
+  const [expandedDay, setExpandedDay] = useState(null)
   const isMulti   = totalDays > 1
   const dateRange = isMulti
     ? `${format(parseISO(days[0].date), 'MMM d')} – ${format(parseISO(days[days.length - 1].date), 'MMM d, yyyy')}`
@@ -199,27 +200,46 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
           </div>
         )}
 
-        {/* ── Day-by-day table (only shown when no discrepancies) ─ */}
+        {/* ── Expandable day breakdown (only shown when no discrepancies) ─ */}
         {!hasDiscrepancies && (
           <>
-            <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
-              <div className="grid grid-cols-3 text-xs font-semibold text-gray-400 uppercase tracking-wider px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-                <span>Date</span>
-                <span className="text-center">Entries</span>
-                <span className="text-right">Hours</span>
-              </div>
-              {days.map(d => (
-                <div key={d.date} className="grid grid-cols-3 px-4 py-2.5 text-sm border-b border-gray-100 dark:border-gray-800 last:border-0">
-                  <span className="font-medium">{format(parseISO(d.date), 'EEE, MMM d')}</span>
-                  <span className="text-center text-gray-500">{d.entriesCount}</span>
-                  <span className="text-right text-gray-700 dark:text-gray-300">{d.hours}h</span>
-                </div>
-              ))}
-              <div className="grid grid-cols-3 px-4 py-2.5 text-sm font-semibold bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
-                <span>Total</span>
-                <span className="text-center text-gray-500">{days.reduce((s, d) => s + d.entriesCount, 0)}</span>
-                <span className="text-right text-ae7-red">{totalHours}h</span>
-              </div>
+            <div className="space-y-2">
+              {days.map((day, di) => {
+                const isOpen = expandedDay === di
+                const dateLabel = format(parseISO(day.date), isMulti ? 'EEE, MMM d, yyyy' : 'MMMM d, yyyy')
+                return (
+                  <div key={day.date} className="bg-gray-50 dark:bg-gray-800 rounded-xl overflow-hidden">
+                    <button
+                      onClick={() => setExpandedDay(isOpen ? null : di)}
+                      className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Calendar size={14} className="text-ae7-red flex-shrink-0" />
+                        <span className="text-sm font-medium">{dateLabel}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-gray-400">{day.hours}h · {day.entriesCount} {day.entriesCount === 1 ? 'entry' : 'entries'}</span>
+                        {isOpen ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
+                      </div>
+                    </button>
+                    {isOpen && day.entries?.length > 0 && (
+                      <div className="border-t border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-700/50">
+                        {day.entries.map((e, i) => (
+                          <div key={i} className="flex items-center justify-between px-4 py-2.5 text-sm">
+                            <div className="min-w-0">
+                              <span className="font-medium">{e.project_name || '—'}</span>
+                              {e.task && <span className="text-gray-400 ml-2 text-xs">· {e.task}</span>}
+                            </div>
+                            <span className="text-gray-400 text-xs flex-shrink-0 ml-3">
+                              {e.time_from} – {e.time_to} ({e.hours_decimal}h)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
             <p className="text-xs text-gray-400 text-center">
               {isMulti
@@ -390,7 +410,7 @@ export default function UploadPage() {
           onDrop={onDrop}
           onClick={() => document.getElementById('file-input').click()}
           className={clsx(
-            'border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all',
+            'relative border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all',
             dragging
               ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/20'
               : file
@@ -408,6 +428,14 @@ export default function UploadPage() {
 
           {file ? (
             <>
+              <button
+                type="button"
+                onClick={e => { e.stopPropagation(); setFile(null); setState('idle'); setErrorMsg('') }}
+                className="absolute top-2 right-2 p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors"
+                aria-label="Remove file"
+              >
+                <X size={15} />
+              </button>
               <FileSpreadsheet size={36} className="text-emerald-500 mx-auto mb-3" />
               <p className="font-medium text-sm">{file.name}</p>
               <p className="text-xs text-gray-400 mt-1">{(file.size / 1024).toFixed(1)} KB · Click to change</p>
