@@ -57,8 +57,8 @@ function EmployeeDashboard({ profile }) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Good {greeting()}, {profile.full_name?.split(' ')[0] || 'there'} 👋</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Here's your timesheet summary.</p>
+        <h1 className="text-2xl font-bold">Good {greeting()}, {profile.full_name?.split(' ')[0] || 'there'}.</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Here's your timesheet summary for the last 10 submissions.</p>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -2,14 +2,74 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { CheckSquare, XCircle, Hourglass, Download, ChevronDown, ChevronUp, Clock } from 'lucide-react'
+import {
+  CheckSquare, XCircle, Hourglass, Download,
+  ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Clock,
+} from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 
+const PAGE_SIZE = 10
+
 const statusConfig = {
-  pending:  { label: 'Pending',  icon: Hourglass,   color: 'text-amber-600 dark:text-amber-400',   bg: 'bg-amber-50  dark:bg-amber-950/30' },
+  pending:  { label: 'Pending',  icon: Hourglass,   color: 'text-amber-600 dark:text-amber-400',    bg: 'bg-amber-50  dark:bg-amber-950/30' },
   approved: { label: 'Approved', icon: CheckSquare, color: 'text-emerald-600 dark:text-emerald-400', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
-  rejected: { label: 'Rejected', icon: XCircle,     color: 'text-red-600 dark:text-red-400',       bg: 'bg-red-50    dark:bg-red-950/30' },
+  rejected: { label: 'Rejected', icon: XCircle,     color: 'text-red-600 dark:text-red-400',        bg: 'bg-red-50    dark:bg-red-950/30' },
+}
+
+function getPageNumbers(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
+  const set = new Set([1, total, current, current - 1, current + 1].filter(p => p >= 1 && p <= total))
+  const sorted = [...set].sort((a, b) => a - b)
+  const result = []
+  let prev = 0
+  for (const p of sorted) {
+    if (p - prev > 1) result.push('...')
+    result.push(p)
+    prev = p
+  }
+  return result
+}
+
+function Pagination({ page, totalPages, onChange }) {
+  if (totalPages <= 1) return null
+  const pages = getPageNumbers(page, totalPages)
+  return (
+    <div className="flex items-center justify-center gap-1 pt-2">
+      <button
+        onClick={() => onChange(page - 1)}
+        disabled={page === 1}
+        className="p-2 rounded-xl text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+      >
+        <ChevronLeft size={16} />
+      </button>
+      {pages.map((p, i) =>
+        p === '...' ? (
+          <span key={`e${i}`} className="w-9 text-center text-sm text-gray-400">…</span>
+        ) : (
+          <button
+            key={p}
+            onClick={() => onChange(p)}
+            className={clsx(
+              'w-9 h-9 rounded-xl text-sm font-medium transition-colors',
+              p === page
+                ? 'bg-ae7-red text-white'
+                : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+            )}
+          >
+            {p}
+          </button>
+        )
+      )}
+      <button
+        onClick={() => onChange(page + 1)}
+        disabled={page === totalPages}
+        className="p-2 rounded-xl text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+      >
+        <ChevronRight size={16} />
+      </button>
+    </div>
+  )
 }
 
 function TimesheetRow({ ts }) {
@@ -114,6 +174,7 @@ export default function HistoryPage() {
   const [timesheets, setTimesheets] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
+  const [page, setPage] = useState(1)
 
   useEffect(() => {
     supabase
@@ -124,14 +185,26 @@ export default function HistoryPage() {
       .then(({ data }) => { if (data) setTimesheets(data); setLoading(false) })
   }, [profile.id])
 
+  function changeFilter(f) {
+    setFilter(f)
+    setPage(1)
+  }
+
   const shown = filter === 'all' ? timesheets : timesheets.filter(t => t.status === filter)
+  const totalPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const paginated = shown.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+
+  const countLabel = filter === 'all'
+    ? `${shown.length} total`
+    : `${shown.length} ${filter}`
 
   return (
     <div className="space-y-6 max-w-3xl">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold">My submissions</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{timesheets.length} total</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{countLabel}</p>
         </div>
         <Link to="/upload" className="btn-primary"><Clock size={16} /> Upload new</Link>
       </div>
@@ -140,11 +213,11 @@ export default function HistoryPage() {
         {['all', 'pending', 'approved', 'rejected'].map(f => (
           <button
             key={f}
-            onClick={() => setFilter(f)}
+            onClick={() => changeFilter(f)}
             className={clsx(
               'px-3 py-1.5 rounded-xl text-sm font-medium transition-colors capitalize',
               filter === f
-                ? 'bg-blue-600 text-white'
+                ? 'bg-ae7-red text-white'
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
             )}
           >
@@ -161,9 +234,12 @@ export default function HistoryPage() {
           <p className="text-gray-500">No {filter !== 'all' ? filter : ''} submissions found.</p>
         </div>
       ) : (
-        <div className="space-y-3">
-          {shown.map(ts => <TimesheetRow key={ts.id} ts={ts} />)}
-        </div>
+        <>
+          <div className="space-y-3">
+            {paginated.map(ts => <TimesheetRow key={ts.id} ts={ts} />)}
+          </div>
+          <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
+        </>
       )}
     </div>
   )

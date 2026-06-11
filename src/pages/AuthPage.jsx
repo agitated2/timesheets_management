@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { Mail, Lock, Eye, EyeOff, ArrowRight, MailCheck, Sun, Moon, RefreshCw, ArrowLeft, Building2 } from 'lucide-react'
+import { Mail, Lock, Eye, EyeOff, ArrowRight, MailCheck, Sun, Moon, RefreshCw, ArrowLeft } from 'lucide-react'
 import { useTheme } from '../contexts/ThemeContext'
 import Logo from '../components/Logo'
 import clsx from 'clsx'
@@ -79,11 +79,8 @@ export default function AuthPage() {
       <div className="w-full max-w-md">
         {/* Brand */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-ae7-red mb-4 shadow-lg ae7-auth-icon">
-            <Building2 size={26} className="text-white" />
-          </div>
-          <div className="mb-1"><Logo size="lg" showPortal={true} /></div>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Welcome to AE7 Portal</p>
+          <div className="mb-3"><Logo size="lg" showPortal={true} /></div>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Access your AE7 employee portal.</p>
         </div>
 
         <div className="card p-8">

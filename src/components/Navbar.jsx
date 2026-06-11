@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, Link, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Clock, BarChart2, CheckSquare,
   Shield, LogOut, Sun, Moon, Menu, X, Settings
@@ -85,7 +85,9 @@ export default function Navbar() {
     <div className="flex flex-col h-full">
       {/* Logo */}
       <div className="px-5 py-5 border-b border-gray-200 dark:border-gray-800">
-        <Logo size="md" showPortal={true} />
+        <Link to="/dashboard">
+          <Logo size="md" showPortal={true} />
+        </Link>
       </div>
 
       {/* User info */}
@@ -135,7 +137,7 @@ export default function Navbar() {
 
       {/* Mobile top bar */}
       <header className="lg:hidden fixed top-0 inset-x-0 z-40 flex items-center justify-between px-4 h-14 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800">
-        <Logo size="sm" showPortal={true} />
+        <Link to="/dashboard"><Logo size="sm" showPortal={true} /></Link>
         <div className="flex items-center gap-1">
           <NotificationBell />
           <button
