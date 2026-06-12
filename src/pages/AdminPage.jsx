@@ -4,10 +4,29 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   Shield, Search, CheckCircle, XCircle, UserPlus, Trash2, X,
   Eye, EyeOff, AlertTriangle, Pencil, FileText, ChevronDown,
-  ChevronUp, Calendar, Check,
+  ChevronUp, Calendar, Check, ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
+
+const PAGE_SIZE = 10
+
+function Pagination({ page, totalPages, onChange }) {
+  if (totalPages <= 1) return null
+  return (
+    <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 dark:border-gray-800">
+      <span className="text-xs text-gray-400">Page {page} of {totalPages}</span>
+      <div className="flex gap-1">
+        <button onClick={() => onChange(page - 1)} disabled={page === 1} className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+          <ChevronLeft size={15} />
+        </button>
+        <button onClick={() => onChange(page + 1)} disabled={page === totalPages} className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+          <ChevronRight size={15} />
+        </button>
+      </div>
+    </div>
+  )
+}
 
 const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control']
 
@@ -418,6 +437,7 @@ export default function AdminPage() {
   const { profile }                       = useAuth()
   const [users, setUsers]                 = useState([])
   const [search, setSearch]               = useState('')
+  const [userPage, setUserPage]           = useState(1)
   const [loading, setLoading]             = useState(true)
   const [pendingAll, setPendingAll]        = useState([])
   const [activeTab, setActiveTab]         = useState('users')
@@ -478,11 +498,16 @@ export default function AdminPage() {
     setTimeout(() => setToast(''), 2500)
   }
 
-  const shown = users.filter(u => {
+  const filtered = users.filter(u => {
     if (!search) return true
     const q = search.toLowerCase()
     return (u.full_name || '').toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
   })
+  const userTotalPages  = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const userCurrentPage = Math.min(userPage, userTotalPages)
+  const shown           = filtered.slice((userCurrentPage - 1) * PAGE_SIZE, userCurrentPage * PAGE_SIZE)
+
+  function handleSearch(v) { setSearch(v); setUserPage(1) }
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -551,7 +576,7 @@ export default function AdminPage() {
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type="text" value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => handleSearch(e.target.value)}
                 className="input pl-9"
                 placeholder="Search users…"
               />
@@ -663,6 +688,7 @@ export default function AdminPage() {
                 })}
               </div>
             )}
+            <Pagination page={userCurrentPage} totalPages={userTotalPages} onChange={setUserPage} />
           </div>
 
           <div className="flex items-start gap-2 text-xs text-gray-400 px-1">

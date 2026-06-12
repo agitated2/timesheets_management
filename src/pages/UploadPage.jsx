@@ -330,7 +330,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
       if (ids.length === 0) { setLoading(false); return }
       const { data: projs } = await supabase
         .from('projects')
-        .select('id, name, project_stages(id, name, start_date, end_date, order_index)')
+        .select('id, name, project_stages(id, name, start_date, end_date, order_index, is_archived)')
         .in('id', ids)
         .eq('status', 'active')
         .order('name')
@@ -592,7 +592,7 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
 function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }) {
   const selectedProject = projects.find(p => p.id === entry.projectId)
   const stages = selectedProject
-    ? [...(selectedProject.project_stages || [])].sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
+    ? [...(selectedProject.project_stages || [])].filter(s => !s.is_archived).sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
     : []
   const hours  = calcHours(entry.timeFrom, entry.timeTo)
   const warning = getStageWarning(entry, date)

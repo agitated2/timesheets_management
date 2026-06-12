@@ -401,6 +401,7 @@ CREATE TABLE IF NOT EXISTS public.project_stages (
   start_date  DATE,
   end_date    DATE,
   order_index INT NOT NULL DEFAULT 0,
+  is_archived BOOLEAN NOT NULL DEFAULT false,
   created_by  UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()

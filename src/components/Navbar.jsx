@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { NavLink, Link, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { NavLink, Link, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Clock, BarChart2, CheckSquare,
   Shield, LogOut, Sun, Moon, Menu, X, Settings, Briefcase
@@ -56,7 +56,10 @@ export default function Navbar() {
   const { profile, signOut, hasRole } = useAuth()
   const { isDark, toggle }            = useTheme()
   const navigate                      = useNavigate()
+  const location                      = useLocation()
   const [mobileOpen, setMobileOpen]   = useState(false)
+
+  useEffect(() => { setMobileOpen(false) }, [location.pathname])
 
   const links = [{ to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' }]
   if (hasRole('employee')) {
@@ -159,14 +162,15 @@ export default function Navbar() {
       </header>
 
       {/* Mobile drawer */}
-      {mobileOpen && (
-        <div className="lg:hidden fixed inset-0 z-30 flex">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setMobileOpen(false)} />
-          <div className="relative w-64 bg-white dark:bg-gray-900 h-full shadow-2xl flex flex-col">
-            <SidebarContent />
-          </div>
+      <div className={clsx('lg:hidden fixed inset-0 z-30 flex transition-all duration-300', mobileOpen ? 'visible' : 'invisible pointer-events-none')}>
+        <div
+          className={clsx('absolute inset-0 bg-black/40 transition-opacity duration-300', mobileOpen ? 'opacity-100' : 'opacity-0')}
+          onClick={() => setMobileOpen(false)}
+        />
+        <div className={clsx('relative w-64 bg-white dark:bg-gray-900 h-full shadow-2xl flex flex-col transition-transform duration-300 ease-in-out', mobileOpen ? 'translate-x-0' : '-translate-x-full')}>
+          <SidebarContent />
         </div>
-      )}
+      </div>
 
       {/* Notification bell for desktop */}
       <div className="hidden lg:block fixed top-4 right-6 z-30">

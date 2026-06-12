@@ -176,7 +176,7 @@ async function checkProjectViolations(db, userId, days) {
   // Load all managed projects (active only) with stages + members
   const { data: projects } = await db
     .from('projects')
-    .select('id, name, project_stages(id, name, start_date, end_date), project_members(employee_id)')
+    .select('id, name, project_stages(id, name, start_date, end_date, is_archived), project_members(employee_id)')
     .eq('status', 'active')
 
   const projectMap = new Map()
@@ -216,7 +216,7 @@ async function checkProjectViolations(db, userId, days) {
     // Stage check — only if the entry mentions a stage
     if (!stage_name) continue
 
-    const stages = p.project_stages || []
+    const stages  = (p.project_stages || []).filter(s => !s.is_archived)
     const matched = stages.find(s => s.name.toLowerCase() === stage_name.toLowerCase())
 
     if (!matched) {

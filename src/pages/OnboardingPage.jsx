@@ -38,7 +38,7 @@ export default function OnboardingPage() {
     const updates = {
       full_name: fullName.trim(),
       onboarding_complete: true,
-      ...(selectedManager && { manager_id: selectedManager.id }),
+      ...(selectedManager && { manager_id: selectedManager.id, manager_ids: [selectedManager.id] }),
     }
 
     const { error: err } = await supabase
@@ -91,7 +91,7 @@ export default function OnboardingPage() {
                 )}
               </div>
               <p className="text-xs text-gray-400 mb-2">
-                Select who will review your timesheets. You can also do this later from Settings.
+                Select who will review your timesheets. To change or add more managers later, contact your IT department.
               </p>
 
               {selectedManager ? (

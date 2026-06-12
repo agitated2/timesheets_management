@@ -416,7 +416,7 @@ function ManageMembersModal({ project, onClose, onSaved }) {
         </p>
         <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden max-h-72 overflow-y-auto divide-y divide-gray-50 dark:divide-gray-800">
           {filtered.map(p => (
-            <label key={p.id} className={clsx('flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors', memberIds.has(p.id) ? 'bg-ae7-light/50 dark:bg-ae7-red/5' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50')}>
+            <label key={p.id} onClick={() => toggle(p.id)} className={clsx('flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors', memberIds.has(p.id) ? 'bg-ae7-light/50 dark:bg-ae7-red/5' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50')}>
               <div className={clsx('w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors', memberIds.has(p.id) ? 'bg-ae7-red border-ae7-red' : 'border-gray-300 dark:border-gray-600')}>
                 {memberIds.has(p.id) && <Check size={10} className="text-white" strokeWidth={3} />}
               </div>
@@ -536,7 +536,7 @@ function ImportModal({ existingProjects, onClose, onImported }) {
 }
 
 // ── Stage Row ────────────────────────────────────────────────────
-function StageRow({ stage, project, onDateAction }) {
+function StageRow({ stage, project, onDateAction, onArchiveStage, readonly }) {
   const state = getStageDateState(stage)
   const startLabel = formatDate(stage.start_date)
   const endLabel   = formatDate(stage.end_date)
@@ -552,42 +552,53 @@ function StageRow({ stage, project, onDateAction }) {
           {endLabel ? endLabel : <span className="italic">End not set</span>}
         </p>
       </div>
-      <div className="flex items-center gap-1.5 flex-shrink-0">
-        {state === 'none' && (
-          <button onClick={() => onDateAction(stage, project, 'define_both')} className="btn-secondary text-xs px-2.5 py-1.5">
-            <Calendar size={12} /> Define Dates
-          </button>
-        )}
-        {state === 'start_only' && (
-          <button onClick={() => onDateAction(stage, project, 'define_end')} className="btn-secondary text-xs px-2.5 py-1.5">
-            <Calendar size={12} /> Define End Date
-          </button>
-        )}
-        {state === 'end_only' && (
-          <>
-            <button onClick={() => onDateAction(stage, project, 'define_start')} className="btn-secondary text-xs px-2.5 py-1.5">
-              <Calendar size={12} /> Define Start
+      {!readonly && (
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {state === 'none' && (
+            <button onClick={() => onDateAction(stage, project, 'define_both')} className="btn-secondary text-xs px-2.5 py-1.5">
+              <Calendar size={12} /> Define Dates
             </button>
+          )}
+          {state === 'start_only' && (
+            <button onClick={() => onDateAction(stage, project, 'define_end')} className="btn-secondary text-xs px-2.5 py-1.5">
+              <Calendar size={12} /> Define End Date
+            </button>
+          )}
+          {state === 'end_only' && (
+            <>
+              <button onClick={() => onDateAction(stage, project, 'define_start')} className="btn-secondary text-xs px-2.5 py-1.5">
+                <Calendar size={12} /> Define Start
+              </button>
+              <button onClick={() => onDateAction(stage, project, 'extend_end')} className="btn-secondary text-xs px-2.5 py-1.5 text-amber-600 dark:text-amber-400">
+                <CalendarDays size={12} /> Extend End
+              </button>
+            </>
+          )}
+          {state === 'both' && (
             <button onClick={() => onDateAction(stage, project, 'extend_end')} className="btn-secondary text-xs px-2.5 py-1.5 text-amber-600 dark:text-amber-400">
-              <CalendarDays size={12} /> Extend End
+              <CalendarDays size={12} /> Extend End Date
             </button>
-          </>
-        )}
-        {state === 'both' && (
-          <button onClick={() => onDateAction(stage, project, 'extend_end')} className="btn-secondary text-xs px-2.5 py-1.5 text-amber-600 dark:text-amber-400">
-            <CalendarDays size={12} /> Extend End Date
+          )}
+          <button
+            onClick={() => onArchiveStage(stage, project)}
+            className="p-1.5 rounded-lg text-gray-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/20 transition-colors"
+            title="Archive stage"
+          >
+            <Archive size={13} />
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }
 
 // ── Project Card ─────────────────────────────────────────────────
-function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, onManageMembers, onArchive, onRefresh }) {
-  const members = project.project_members || []
-  const stages  = (project.project_stages || []).sort((a, b) => a.order_index - b.order_index)
-  const isArchived = project.status === 'archived'
+function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, onManageMembers, onArchive, onArchiveStage }) {
+  const members        = project.project_members || []
+  const allStages      = (project.project_stages || []).sort((a, b) => a.order_index - b.order_index)
+  const stages         = allStages.filter(s => !s.is_archived)
+  const archivedStages = allStages.filter(s => s.is_archived)
+  const isArchived     = project.status === 'archived'
 
   return (
     <div className={clsx('card overflow-hidden', isArchived && 'opacity-60')}>
@@ -631,11 +642,18 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, on
               )}
             </div>
             <div className="space-y-2">
-              {stages.length === 0 ? (
+              {stages.length === 0 && archivedStages.length === 0 ? (
                 <p className="text-sm text-gray-400 italic">No stages yet.</p>
+              ) : stages.length === 0 ? (
+                <p className="text-sm text-gray-400 italic">No active stages.</p>
               ) : stages.map(s => (
-                <StageRow key={s.id} stage={s} project={project} onDateAction={isArchived ? () => {} : onDateAction} />
+                <StageRow key={s.id} stage={s} project={project} onDateAction={onDateAction} onArchiveStage={onArchiveStage} readonly={isArchived} />
               ))}
+              {archivedStages.length > 0 && (
+                <p className="text-xs text-gray-400 italic pt-1">
+                  + {archivedStages.length} archived stage{archivedStages.length !== 1 ? 's' : ''} — view in the Archived tab.
+                </p>
+              )}
             </div>
           </div>
 
@@ -805,7 +823,7 @@ export default function ProjectsPage() {
       .from('projects')
       .select(`
         id, name, description, status, created_at,
-        project_stages (id, name, start_date, end_date, order_index, created_at),
+        project_stages (id, name, start_date, end_date, order_index, is_archived, created_at),
         project_members (
           id, employee_id,
           profiles!employee_id (id, full_name, email)
@@ -828,13 +846,27 @@ export default function ProjectsPage() {
   }
 
   const shown = useMemo(() => {
-    if (!search) return projects
+    const active = projects.filter(p => p.status !== 'archived')
+    if (!search) return active
     const q = search.toLowerCase()
-    return projects.filter(p => p.name.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q))
+    return active.filter(p => p.name.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q))
   }, [projects, search])
+
+  async function handleArchiveStage(stage, project) {
+    if (!window.confirm(`Archive stage "${stage.name}" in "${project.name}"?\n\nExisting timesheet entries linked to this stage are preserved. The stage will no longer appear in active views or upload dropdowns.`)) return
+    await supabase.from('project_stages').update({ is_archived: true }).eq('id', stage.id)
+    await loadProjects()
+    showToast(`Stage "${stage.name}" archived.`)
+  }
+
+  const archivedProjects = projects.filter(p => p.status === 'archived')
+  const allArchivedStages = projects.flatMap(p =>
+    (p.project_stages || []).filter(s => s.is_archived).map(s => ({ ...s, projectName: p.name }))
+  )
 
   const tabs = [
     { id: 'projects', label: 'Projects' },
+    { id: 'archived', label: `Archived${archivedProjects.length + allArchivedStages.length > 0 ? ` (${archivedProjects.length + allArchivedStages.length})` : ''}` },
     { id: 'logs',     label: 'Logs' },
   ]
 
@@ -931,12 +963,67 @@ export default function ProjectsPage() {
                   onDateAction={(stage, project, action) => setDateTarget({ stage, project, action })}
                   onManageMembers={setMembersFor}
                   onArchive={handleArchive}
-                  onRefresh={loadProjects}
+                  onArchiveStage={handleArchiveStage}
                 />
               ))}
             </div>
           )}
         </>
+      )}
+
+      {activeTab === 'archived' && (
+        <div className="space-y-6">
+          {/* Archived projects */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+              Archived projects ({archivedProjects.length})
+            </h3>
+            {archivedProjects.length === 0 ? (
+              <p className="text-sm text-gray-400 italic">No archived projects.</p>
+            ) : (
+              <div className="space-y-3">
+                {archivedProjects.map(p => (
+                  <ProjectCard
+                    key={p.id}
+                    project={p}
+                    expanded={expanded === p.id}
+                    onToggle={() => setExpanded(expanded === p.id ? null : p.id)}
+                    onAddStage={() => {}}
+                    onDateAction={() => {}}
+                    onManageMembers={() => {}}
+                    onArchive={() => {}}
+                    onArchiveStage={() => {}}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Archived stages */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+              Archived stages ({allArchivedStages.length})
+            </h3>
+            {allArchivedStages.length === 0 ? (
+              <p className="text-sm text-gray-400 italic">No archived stages.</p>
+            ) : (
+              <div className="card overflow-hidden divide-y divide-gray-100 dark:divide-gray-800">
+                {allArchivedStages.map(s => (
+                  <div key={s.id} className="flex items-center justify-between px-5 py-3.5 gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">{s.name}</p>
+                      <p className="text-xs text-gray-400">{s.projectName}</p>
+                    </div>
+                    <div className="flex items-center gap-3 flex-shrink-0 text-xs text-gray-400">
+                      <span>{s.start_date ? formatDate(s.start_date) : '—'} → {s.end_date ? formatDate(s.end_date) : '—'}</span>
+                      <span className="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500">Archived</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {activeTab === 'logs' && <LogsTab projects={projects} />}

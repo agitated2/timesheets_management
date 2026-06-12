@@ -3,10 +3,30 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
   User, Shield, Search, CheckCircle,
-  Save, Info, Users, AlertCircle, Lock, Eye, EyeOff
+  Save, Info, Users, AlertCircle, Lock, Eye, EyeOff,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
+
+const PAGE_SIZE = 10
+
+function Pagination({ page, totalPages, onChange }) {
+  if (totalPages <= 1) return null
+  return (
+    <div className="flex items-center justify-between px-6 py-3 border-t border-gray-100 dark:border-gray-800 text-sm">
+      <span className="text-xs text-gray-400">Page {page} of {totalPages}</span>
+      <div className="flex gap-1">
+        <button onClick={() => onChange(page - 1)} disabled={page === 1} className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+          <ChevronLeft size={15} />
+        </button>
+        <button onClick={() => onChange(page + 1)} disabled={page === totalPages} className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+          <ChevronRight size={15} />
+        </button>
+      </div>
+    </div>
+  )
+}
 
 // ----------------------------------------------------------------
 // Role config
@@ -74,6 +94,7 @@ function ProfileSection({ profile, refreshProfile }) {
   const [assignedManagers, setAssignedMgrs] = useState([])
   const [saving, setSaving]               = useState(false)
   const [saved, setSaved]                 = useState(false)
+  const hasChanges = name.trim() !== (profile.full_name || '')
 
   const isEmployee = Array.isArray(profile.roles) ? profile.roles.includes('employee') : profile.role === 'employee'
   const isIT       = Array.isArray(profile.roles) ? profile.roles.includes('it') : profile.role === 'it'
@@ -168,7 +189,7 @@ function ProfileSection({ profile, refreshProfile }) {
         )}
 
         <div className="flex items-center gap-3 pt-1">
-          <button type="submit" disabled={saving || !name.trim()} className="btn-primary">
+          <button type="submit" disabled={saving || !name.trim() || !hasChanges} className="btn-primary">
             {saving ? (
               <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving…</>
             ) : saved ? (
@@ -283,6 +304,7 @@ function RoleManagementSection() {
   const { profile: currentUser } = useAuth()
   const [users, setUsers]     = useState([])
   const [search, setSearch]   = useState('')
+  const [page, setPage]       = useState(1)
   const [loading, setLoading] = useState(true)
   const [toast, setToast]     = useState({ msg: '', type: 'info' })
   const [pending, setPending] = useState({}) // userId → newRole (unsaved)
@@ -329,11 +351,17 @@ function RoleManagementSection() {
     setPending(p => { const n = { ...p }; delete n[userId]; return n })
   }
 
-  const shown = users.filter(u => {
+  const filtered = users.filter(u => {
     if (!search) return true
     const q = search.toLowerCase()
     return (u.full_name || '').toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
   })
+
+  const totalPages  = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const shown       = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+
+  function handleSearch(v) { setSearch(v); setPage(1) }
 
   return (
     <section className="card overflow-hidden">
@@ -357,7 +385,7 @@ function RoleManagementSection() {
           <input
             type="text"
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => handleSearch(e.target.value)}
             className="input pl-9 text-sm"
             placeholder="Search by name or email…"
           />
@@ -366,7 +394,7 @@ function RoleManagementSection() {
 
       {loading ? (
         <div className="p-8 text-center text-gray-400 text-sm">Loading users…</div>
-      ) : shown.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="p-8 text-center text-gray-400 text-sm">No users found.</div>
       ) : (
         <div className="divide-y divide-gray-100 dark:divide-gray-800">
@@ -452,6 +480,8 @@ function RoleManagementSection() {
           })}
         </div>
       )}
+
+      <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
 
       {/* Role descriptions */}
       <div className="px-6 py-5 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/20">
