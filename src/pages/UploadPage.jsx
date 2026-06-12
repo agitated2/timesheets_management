@@ -455,8 +455,8 @@ function InAppEntry({ profile, onBack, onSuccess }) {
           <ChevronRight size={18} className="rotate-180" />
         </button>
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            In-app timesheet entry
+          <h1 className="page-title flex items-center gap-2">
+            In-app entry
             <span className="text-xs font-semibold bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full">Beta</span>
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Add dates and entries directly in the browser.</p>
@@ -773,7 +773,7 @@ function UploadPageInner({ profile }) {
   return (
     <div className="max-w-lg mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Upload timesheet</h1>
+        <h1 className="page-title">Upload timesheet</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
           Upload your daily or weekly Excel timesheet file.
         </p>

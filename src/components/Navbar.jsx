@@ -30,7 +30,7 @@ function NavItem({ to, icon: Icon, label, onClick }) {
   if (onClick) return (
     <button
       onClick={onClick}
-      className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors w-full"
+      className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors w-full"
     >
       <Icon size={18} />
       {label}
@@ -40,10 +40,10 @@ function NavItem({ to, icon: Icon, label, onClick }) {
     <NavLink
       to={to}
       className={({ isActive }) => clsx(
-        'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors',
+        'flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors',
         isActive
-          ? 'bg-ae7-light dark:bg-ae7-red/10 text-ae7-red dark:text-red-300'
-          : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+          ? 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-semibold'
+          : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
       )}
     >
       <Icon size={18} />
@@ -124,7 +124,7 @@ export default function Navbar() {
       <div className="px-3 pb-4 pt-2 border-t border-gray-100 dark:border-gray-800 space-y-1">
         <button
           onClick={toggle}
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors w-full"
+          className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors w-full"
         >
           {isDark ? <Sun size={18} /> : <Moon size={18} />}
           {isDark ? 'Light mode' : 'Dark mode'}
@@ -148,13 +148,13 @@ export default function Navbar() {
           <NotificationBell />
           <button
             onClick={toggle}
-            className="p-2 rounded-xl text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
           >
             {isDark ? <Sun size={18} /> : <Moon size={18} />}
           </button>
           <button
             onClick={() => setMobileOpen(o => !o)}
-            className="p-2 rounded-xl text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
           >
             {mobileOpen ? <X size={20} /> : <Menu size={20} />}
           </button>

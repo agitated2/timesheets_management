@@ -32,9 +32,9 @@ function StatPill({ label, value, color = 'blue' }) {
     red:   'bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300',
   }
   return (
-    <div className={clsx('rounded-2xl p-4', colorMap[color])}>
-      <p className="text-xs font-medium opacity-75">{label}</p>
-      <p className="text-2xl font-bold mt-0.5">{value}</p>
+    <div className={clsx('rounded-lg p-4', colorMap[color])}>
+      <p className="text-xs font-medium opacity-75 uppercase tracking-wide">{label}</p>
+      <p className="text-2xl font-semibold tabular-nums mt-0.5">{value}</p>
     </div>
   )
 }
@@ -271,7 +271,7 @@ export default function AnalyticsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3 lg:pr-14">
         <div>
-          <h1 className="text-2xl font-bold">Analytics</h1>
+          <h1 className="page-title">Analytics</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Approved timesheets only</p>
         </div>
         <button onClick={downloadCSV} className="btn-secondary gap-2 text-sm">

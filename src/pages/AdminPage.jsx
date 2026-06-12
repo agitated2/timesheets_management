@@ -544,12 +544,8 @@ export default function AdminPage() {
       )}
 
       <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Shield size={22} className="text-ae7-red" /> IT Admin Panel
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-          Manage users, roles, timesheets, and override decisions.
-        </p>
+        <h1 className="page-title">IT Admin Panel</h1>
+        <p className="page-subtitle">Manage users, roles, timesheets, and override decisions.</p>
       </div>
 
       <div className="flex gap-2">
@@ -748,7 +744,7 @@ export default function AdminPage() {
 function Modal({ title, icon, onClose, children, wide = false }) {
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className={clsx('bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full', wide ? 'max-w-lg' : 'max-w-md')}>
+      <div className={clsx('bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-800 w-full', wide ? 'max-w-lg' : 'max-w-md')}>
         <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 dark:border-gray-800">
           <div className="flex items-center gap-2">
             {icon}

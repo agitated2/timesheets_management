@@ -51,7 +51,7 @@ export default function ReviewsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Timesheet Reviews</h1>
+        <h1 className="page-title">Timesheet Reviews</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
           Review and approve your team's daily timesheets.
         </p>
@@ -74,9 +74,9 @@ export default function ReviewsPage() {
               key={f}
               onClick={() => setFilter(f)}
               className={clsx(
-                'px-3 py-2 rounded-xl text-sm font-medium transition-colors capitalize',
+                'px-3 py-2 rounded-md text-sm font-medium transition-colors capitalize',
                 filter === f
-                  ? 'bg-blue-600 text-white'
+                  ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'
                   : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
               )}
             >

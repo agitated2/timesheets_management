@@ -205,7 +205,7 @@ export default function HistoryPage() {
     <div className="space-y-6 max-w-3xl">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold">My submissions</h1>
+          <h1 className="page-title">My submissions</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{countLabel}</p>
         </div>
         <Link to="/upload" className="btn-primary"><Clock size={16} /> Upload new</Link>

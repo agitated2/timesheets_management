@@ -118,11 +118,8 @@ function ProfileSection({ profile, refreshProfile }) {
   }
 
   return (
-    <section className="card p-6 space-y-5">
-      <div className="flex items-center gap-2">
-        <User size={18} className="text-blue-500" />
-        <h2 className="font-semibold">Profile</h2>
-      </div>
+    <section className="p-6 space-y-5">
+      <h2 className="text-sm font-semibold">Profile</h2>
 
       <form onSubmit={save} className="space-y-4">
         {/* Read-only account info */}
@@ -231,11 +228,8 @@ function PasswordSection() {
   }
 
   return (
-    <section className="card p-6 space-y-5">
-      <div className="flex items-center gap-2">
-        <Lock size={18} className="text-blue-500" />
-        <h2 className="font-semibold">Password</h2>
-      </div>
+    <section className="p-6 space-y-5">
+      <h2 className="text-sm font-semibold">Password</h2>
       <p className="text-sm text-gray-500 dark:text-gray-400 -mt-2">
         Set or change your password. If you sign in with email links, you can set a password here to use credentials instead.
       </p>
@@ -366,10 +360,7 @@ function RoleManagementSection() {
   return (
     <section className="card overflow-hidden">
       <div className="px-6 py-5 border-b border-gray-100 dark:border-gray-800 space-y-3">
-        <div className="flex items-center gap-2">
-          <Shield size={18} className="text-red-500" />
-          <h2 className="font-semibold">User Role Management</h2>
-        </div>
+        <h2 className="text-sm font-semibold">User role management</h2>
 
         {/* Default role note */}
         <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/20 rounded-xl p-3">
@@ -513,15 +504,16 @@ export default function SettingsPage() {
   return (
     <div className="max-w-3xl space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Settings</h1>
+        <h1 className="page-title">Settings</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
           Manage your profile and password{isIT ? ', and user roles' : ''}.
         </p>
       </div>
 
-      <ProfileSection profile={profile} refreshProfile={refreshProfile} />
-
-      <PasswordSection />
+      <div className="card divide-y divide-gray-100 dark:divide-gray-800">
+        <ProfileSection profile={profile} refreshProfile={refreshProfile} />
+        <PasswordSection />
+      </div>
 
       {isIT && <RoleManagementSection />}
     </div>

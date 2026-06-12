@@ -72,7 +72,7 @@ function Pagination({ page, totalPages, onChange }) {
 function Modal({ title, icon, onClose, children, wide = false }) {
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className={clsx('bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full flex flex-col max-h-[90vh]', wide ? 'max-w-2xl' : 'max-w-md')}>
+      <div className={clsx('bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-800 w-full flex flex-col max-h-[90vh]', wide ? 'max-w-2xl' : 'max-w-md')}>
         <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
           <div className="flex items-center gap-2">{icon}<h3 className="font-semibold text-sm">{title}</h3></div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"><X size={18} /></button>
@@ -899,12 +899,8 @@ export default function ProjectsPage() {
       )}
 
       <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Briefcase size={22} className="text-ae7-red" /> Projects Management
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-          Manage projects, stages, and team assignments.
-        </p>
+        <h1 className="page-title">Projects</h1>
+        <p className="page-subtitle">Manage projects, stages, and team assignments.</p>
       </div>
 
       {/* Tabs */}

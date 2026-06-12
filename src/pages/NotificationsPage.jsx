@@ -59,7 +59,7 @@ export default function NotificationsPage() {
     <div className="max-w-2xl space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Notifications</h1>
+          <h1 className="page-title">Notifications</h1>
           {unreadCount > 0 && (
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{unreadCount} unread</p>
           )}
