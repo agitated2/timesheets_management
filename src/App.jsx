@@ -14,6 +14,7 @@ import NotificationsPage from './pages/NotificationsPage'
 import AnalyticsPage from './pages/AnalyticsPage'
 import AdminPage from './pages/AdminPage'
 import SettingsPage from './pages/SettingsPage'
+import ProjectsPage from './pages/ProjectsPage'
 import AuthCallback from './pages/AuthCallback'
 
 function RoleGate({ allow, children }) {
@@ -52,6 +53,9 @@ function AppRoutes() {
 
           {/* Settings — all roles; IT gets extra role-management section */}
           <Route path="/settings"    element={<SettingsPage />} />
+
+          {/* Projects */}
+          <Route path="/projects"    element={<RoleGate allow={['projects_control','it']}><ProjectsPage /></RoleGate>} />
 
           {/* IT only */}
           <Route path="/admin"       element={<RoleGate allow={['it']}><AdminPage /></RoleGate>} />

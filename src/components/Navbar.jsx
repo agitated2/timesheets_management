@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, Link, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Clock, BarChart2, CheckSquare,
-  Shield, LogOut, Sun, Moon, Menu, X, Settings
+  Shield, LogOut, Sun, Moon, Menu, X, Settings, Briefcase
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -70,6 +70,9 @@ export default function Navbar() {
   }
   if (hasRole('global_analytics') || hasRole('team_analytics')) {
     links.push({ to: '/analytics', icon: BarChart2, label: 'Analytics' })
+  }
+  if (hasRole('projects_control') || hasRole('it')) {
+    links.push({ to: '/projects', icon: Briefcase, label: 'Projects' })
   }
   if (hasRole('it')) {
     links.push({ to: '/admin', icon: Shield, label: 'IT Admin' })

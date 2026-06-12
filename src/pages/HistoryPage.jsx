@@ -128,13 +128,15 @@ function TimesheetRow({ ts }) {
             <Icon size={12} />
             {label}
           </div>
-          <button
-            onClick={e => { e.stopPropagation(); downloadFile() }}
-            title="Download original file"
-            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-          >
-            <Download size={15} />
-          </button>
+          {ts.file_path !== 'inapp' && (
+            <button
+              onClick={e => { e.stopPropagation(); downloadFile() }}
+              title="Download original file"
+              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            >
+              <Download size={15} />
+            </button>
+          )}
           {open ? <ChevronUp size={16} className="text-gray-400" /> : <ChevronDown size={16} className="text-gray-400" />}
         </div>
       </div>

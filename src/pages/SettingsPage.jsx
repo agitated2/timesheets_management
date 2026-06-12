@@ -11,7 +11,7 @@ import clsx from 'clsx'
 // ----------------------------------------------------------------
 // Role config
 // ----------------------------------------------------------------
-const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics']
+const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control']
 
 const roleDisplay = {
   employee:         'Employee',
@@ -21,6 +21,7 @@ const roleDisplay = {
   it:               'IT Admin',
   global_analytics: 'Global Analytics',
   team_analytics:   'Team Analytics',
+  projects_control: 'Projects Control',
 }
 
 const roleBadge = {
@@ -31,6 +32,7 @@ const roleBadge = {
   it:               'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
   global_analytics: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
   team_analytics:   'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
+  projects_control: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
 }
 
 const roleDescription = {
@@ -41,6 +43,7 @@ const roleDescription = {
   it:               'Full override access including manual approval of any timesheet.',
   global_analytics: 'Can view analytics and reports for all employees across the organization.',
   team_analytics:   'Can view analytics for employees who have chosen them as their manager.',
+  projects_control: 'Can manage projects, stages, and team assignments in the Projects portal.',
 }
 
 // ----------------------------------------------------------------
@@ -67,24 +70,23 @@ function Toast({ message, type }) {
 // Profile section — all roles
 // ----------------------------------------------------------------
 function ProfileSection({ profile, refreshProfile }) {
-  const [name, setName]         = useState(profile.full_name || '')
-  const [managers, setManagers] = useState([])
-  const [managerId]             = useState(profile.manager_id || '')
-  const [saving, setSaving]     = useState(false)
-  const [saved, setSaved]       = useState(false)
+  const [name, setName]                   = useState(profile.full_name || '')
+  const [assignedManagers, setAssignedMgrs] = useState([])
+  const [saving, setSaving]               = useState(false)
+  const [saved, setSaved]                 = useState(false)
 
   const isEmployee = Array.isArray(profile.roles) ? profile.roles.includes('employee') : profile.role === 'employee'
-  const isIT = Array.isArray(profile.roles) ? profile.roles.includes('it') : profile.role === 'it'
+  const isIT       = Array.isArray(profile.roles) ? profile.roles.includes('it') : profile.role === 'it'
+  const managerIds = profile.manager_ids || []
 
   useEffect(() => {
-    if (!isEmployee) return
+    if (!isEmployee || managerIds.length === 0) return
     supabase
       .from('profiles')
-      .select('id, full_name, email, roles')
-      .filter('roles', 'ov', '{manager,c_suite}')
-      .order('full_name')
-      .then(({ data }) => { if (data) setManagers(data) })
-  }, [isEmployee])
+      .select('id, full_name, email')
+      .in('id', managerIds)
+      .then(({ data }) => { if (data) setAssignedMgrs(data) })
+  }, [isEmployee, managerIds.join(',')])
 
   async function save(e) {
     e.preventDefault()
@@ -93,8 +95,6 @@ function ProfileSection({ profile, refreshProfile }) {
     setSaving(false)
     if (!error) { setSaved(true); setTimeout(() => setSaved(false), 2000); await refreshProfile() }
   }
-
-  const currentManager = managers.find(m => m.id === managerId)
 
   return (
     <section className="card p-6 space-y-5">
@@ -142,20 +142,26 @@ function ProfileSection({ profile, refreshProfile }) {
           />
         </div>
 
-        {/* Line manager — read-only after onboarding */}
+        {/* Line managers — read-only, set by IT */}
         {isEmployee && (
           <div>
-            <label className="label">Line manager</label>
-            {currentManager && (
-              <div className="flex items-center gap-2 mb-3 text-sm text-gray-500 dark:text-gray-400">
-                <CheckCircle size={14} className="text-emerald-500" />
-                Currently: <span className="font-medium text-gray-900 dark:text-gray-100">{currentManager.full_name || currentManager.email}</span>
+            <label className="label">Line manager{assignedManagers.length !== 1 ? 's' : ''}</label>
+            {assignedManagers.length > 0 ? (
+              <div className="space-y-1.5 mb-3">
+                {assignedManagers.map(m => (
+                  <div key={m.id} className="flex items-center gap-2 text-sm">
+                    <CheckCircle size={12} className="text-emerald-500 flex-shrink-0" />
+                    <span className="font-medium text-gray-900 dark:text-gray-100">{m.full_name || m.email}</span>
+                  </div>
+                ))}
               </div>
+            ) : (
+              <p className="text-sm text-gray-400 italic mb-3">No line manager assigned yet.</p>
             )}
             <div className="flex items-start gap-2.5 bg-blue-50 dark:bg-blue-950/20 rounded-xl p-3">
               <Info size={14} className="text-blue-500 flex-shrink-0 mt-0.5" />
               <p className="text-xs text-blue-700 dark:text-blue-300">
-                To change your line manager, please contact your IT department.
+                Line manager assignments are managed by your IT department.
               </p>
             </div>
           </div>

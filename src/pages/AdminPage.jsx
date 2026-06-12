@@ -9,7 +9,7 @@ import {
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 
-const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics']
+const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control']
 
 const roleDisplay = {
   employee:         'Employee',
@@ -19,6 +19,7 @@ const roleDisplay = {
   it:               'IT Admin',
   global_analytics: 'Global Analytics',
   team_analytics:   'Team Analytics',
+  projects_control: 'Projects Control',
 }
 
 const roleBadge = {
@@ -29,6 +30,7 @@ const roleBadge = {
   it:               'bg-ae7-light text-ae7-red dark:bg-ae7-red/10 dark:text-red-300',
   global_analytics: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
   team_analytics:   'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
+  projects_control: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
 }
 
 const statusBadge = {
@@ -133,19 +135,24 @@ function CreateUserModal({ onClose, onCreated }) {
 
 // ── Edit User Modal ────────────────────────────────────────────────
 function EditUserModal({ user: target, onClose, onSaved }) {
-  const targetRoles               = target.roles || (target.role ? [target.role] : ['employee'])
-  const [email, setEmail]         = useState(target.email || '')
-  const [fullName, setFullName]   = useState(target.full_name || '')
-  const [roles, setRoles]         = useState(targetRoles)
-  const [managerId, setManagerId] = useState(target.manager_id || '')
-  const [newPassword, setNewPw]   = useState('')
-  const [showPw, setShowPw]       = useState(false)
-  const [managers, setManagers]   = useState([])
-  const [loading, setLoading]     = useState(false)
-  const [error, setError]         = useState('')
+  const targetRoles      = target.roles || (target.role ? [target.role] : ['employee'])
+  const targetManagerIds = target.manager_ids || []
+  const [email, setEmail]           = useState(target.email || '')
+  const [fullName, setFullName]     = useState(target.full_name || '')
+  const [roles, setRoles]           = useState(targetRoles)
+  const [managerIds, setManagerIds] = useState(targetManagerIds)
+  const [newPassword, setNewPw]     = useState('')
+  const [showPw, setShowPw]         = useState(false)
+  const [managers, setManagers]     = useState([])
+  const [loading, setLoading]       = useState(false)
+  const [error, setError]           = useState('')
 
   function toggleEditRole(r) {
     setRoles(prev => prev.includes(r) ? prev.filter(x => x !== r) : [...prev, r])
+  }
+
+  function toggleManager(id) {
+    setManagerIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
   }
 
   useEffect(() => {
@@ -166,11 +173,11 @@ function EditUserModal({ user: target, onClose, onSaved }) {
 
     const session = await getSession()
     const body = { userId: target.id }
-    if (email.trim().toLowerCase() !== target.email) body.email = email.trim().toLowerCase()
-    if (fullName.trim() !== (target.full_name || ''))  body.fullName  = fullName.trim()
-    if (JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort())) body.roles = roles
-    if (managerId !== (target.manager_id || ''))        body.managerId = managerId || null
-    if (newPassword)                                    body.newPassword = newPassword
+    if (email.trim().toLowerCase() !== target.email)                                     body.email      = email.trim().toLowerCase()
+    if (fullName.trim() !== (target.full_name || ''))                                    body.fullName   = fullName.trim()
+    if (JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort()))   body.roles      = roles
+    if (JSON.stringify([...managerIds].sort()) !== JSON.stringify([...targetManagerIds].sort())) body.managerIds = managerIds
+    if (newPassword)                                                                      body.newPassword = newPassword
 
     const res = await fetch('/.netlify/functions/update-user', {
       method: 'POST',
@@ -180,7 +187,7 @@ function EditUserModal({ user: target, onClose, onSaved }) {
     const json = await res.json()
     setLoading(false)
     if (!res.ok) { setError(json.error); return }
-    onSaved({ ...target, email: body.email ?? target.email, full_name: body.fullName ?? target.full_name, roles: body.roles ?? target.roles, manager_id: body.managerId !== undefined ? body.managerId : target.manager_id })
+    onSaved({ ...target, email: body.email ?? target.email, full_name: body.fullName ?? target.full_name, roles: body.roles ?? target.roles, manager_ids: body.managerIds ?? target.manager_ids })
     onClose()
   }
 
@@ -214,13 +221,24 @@ function EditUserModal({ user: target, onClose, onSaved }) {
           </div>
         </Field>
 
-        <Field label="Line manager">
-          <select value={managerId} onChange={e => setManagerId(e.target.value)} className="input text-sm">
-            <option value="">— None —</option>
+        <Field label={`Line managers (${managerIds.length} assigned)`}>
+          <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden divide-y divide-gray-100 dark:divide-gray-800 max-h-44 overflow-y-auto">
+            {managers.length === 0 && (
+              <p className="text-xs text-gray-400 px-4 py-2.5 italic">No managers or C-Suite found.</p>
+            )}
             {managers.map(m => (
-              <option key={m.id} value={m.id}>{m.full_name || m.email}</option>
+              <label
+                key={m.id}
+                className={clsx(
+                  'flex items-center gap-3 px-4 py-2 cursor-pointer transition-colors text-sm',
+                  managerIds.includes(m.id) ? 'bg-ae7-light/60 dark:bg-ae7-red/5' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                )}
+              >
+                <Checkbox checked={managerIds.includes(m.id)} onChange={() => toggleManager(m.id)} />
+                <span>{m.full_name || m.email}</span>
+              </label>
             ))}
-          </select>
+          </div>
         </Field>
 
         <Field label={<>Reset password <span className="font-normal text-gray-400">(leave blank to keep current)</span></>}>

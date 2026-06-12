@@ -119,7 +119,7 @@ function ManagerDashboard({ profile }) {
   useEffect(() => {
     async function load() {
       const [{ data: team }, { data: pend }] = await Promise.all([
-        supabase.from('profiles').select('id').eq('manager_id', profile.id),
+        supabase.from('profiles').select('id').filter('manager_ids', 'cs', `{${profile.id}}`),
         supabase.from('timesheets')
           .select('*, profiles!employee_id(full_name, email)')
           .eq('status', 'pending')

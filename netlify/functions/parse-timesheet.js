@@ -62,6 +62,7 @@ exports.handler = async (event) => {
         hours: round2(d.entries.reduce((s, e) => s + (e.hours_decimal || 0), 0)),
         entries: d.entries,
       }))
+      const projectViolations = await checkProjectViolations(supabaseAdmin, user.id, days)
       return {
         statusCode: 200,
         headers,
@@ -72,6 +73,8 @@ exports.handler = async (event) => {
           totalHours: round2(preview.reduce((s, d) => s + d.hours, 0)),
           discrepancies,
           hasDiscrepancies: discrepancies.length > 0,
+          projectViolations,
+          hasProjectViolations: projectViolations.length > 0,
         }),
       }
     }
@@ -84,6 +87,19 @@ exports.handler = async (event) => {
         body: JSON.stringify({
           error: `File contains ${discrepancies.length} time discrepanc${discrepancies.length === 1 ? 'y' : 'ies'}. Please fix them before uploading.`,
           discrepancies,
+        }),
+      }
+    }
+
+    // ── Block actual upload if there are project violations ─────
+    const projectViolations = await checkProjectViolations(supabaseAdmin, user.id, days)
+    if (projectViolations.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: `Timesheet has ${projectViolations.length} project access violation${projectViolations.length === 1 ? '' : 's'}. Please resolve them before uploading.`,
+          projectViolations,
         }),
       }
     }
@@ -113,7 +129,7 @@ exports.handler = async (event) => {
 
       const { error: entryErr } = await supabaseAdmin
         .from('timesheet_entries')
-        .insert(day.entries.map(e => ({ ...e, timesheet_id: timesheet.id })))
+        .insert(day.entries.map(({ stage_name, row_number, ...e }) => ({ ...e, timesheet_id: timesheet.id })))
       if (entryErr) throw new Error(`Entries insert error for ${day.date}: ${entryErr.message}`)
 
       resultDays.push({ date: day.date, timesheet, entries: day.entries, hours: totalHours })
@@ -132,6 +148,96 @@ exports.handler = async (event) => {
     console.error('parse-timesheet error:', err)
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) }
   }
+}
+
+// ---------------------------------------------------------------
+// PROJECT VALIDATION
+// Checks project existence, membership, stage existence, and stage
+// date coverage for each entry. Groups violations by unique issue
+// and collects all affected row numbers per violation.
+// ---------------------------------------------------------------
+
+async function checkProjectViolations(db, userId, days) {
+  // Collect all entries that reference a project
+  const pairs = []
+  for (const day of days) {
+    for (const entry of day.entries) {
+      if (!entry.project_name) continue
+      pairs.push({
+        date:         day.date,
+        project_name: entry.project_name,
+        stage_name:   entry.stage_name   || null,
+        row_number:   entry.row_number   || null,
+      })
+    }
+  }
+  if (pairs.length === 0) return []
+
+  // Load all managed projects (active only) with stages + members
+  const { data: projects } = await db
+    .from('projects')
+    .select('id, name, project_stages(id, name, start_date, end_date), project_members(employee_id)')
+    .eq('status', 'active')
+
+  const projectMap = new Map()
+  for (const p of (projects || [])) projectMap.set(p.name.toLowerCase(), p)
+
+  // violationMap groups identical issues, collecting row numbers
+  // Key: 'type::project::stage::date'
+  const violationMap = new Map()
+
+  function addViolation(type, project, stage, date, row_number) {
+    const key = `${type}::${project.toLowerCase()}::${(stage || '').toLowerCase()}::${date}`
+    if (violationMap.has(key)) {
+      if (row_number) violationMap.get(key).rowNumbers.push(row_number)
+    } else {
+      violationMap.set(key, {
+        type, project, stage: stage || null, date,
+        rowNumbers: row_number ? [row_number] : [],
+      })
+    }
+  }
+
+  for (const { date, project_name, stage_name, row_number } of pairs) {
+    const p = projectMap.get(project_name.toLowerCase())
+
+    if (!p) {
+      addViolation('project_not_found', project_name, null, date, row_number)
+      continue
+    }
+
+    // Membership check
+    const isMember = (p.project_members || []).some(m => m.employee_id === userId)
+    if (!isMember) {
+      addViolation('not_member', project_name, null, date, row_number)
+      continue
+    }
+
+    // Stage check — only if the entry mentions a stage
+    if (!stage_name) continue
+
+    const stages = p.project_stages || []
+    const matched = stages.find(s => s.name.toLowerCase() === stage_name.toLowerCase())
+
+    if (!matched) {
+      addViolation('stage_not_found', project_name, stage_name, date, row_number)
+      continue
+    }
+
+    // Date coverage check for the specific stage
+    const { start_date: s, end_date: e } = matched
+    let covered = true
+    if (!s && !e) covered = true
+    else if (!s)  covered = date <= e
+    else if (!e)  covered = date >= s
+    else          covered = date >= s && date <= e
+
+    if (!covered) {
+      addViolation('stage_expired', project_name, stage_name, date, row_number)
+    }
+  }
+
+  return [...violationMap.values()]
 }
 
 // ---------------------------------------------------------------
@@ -276,6 +382,8 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
         time_to:       parsed.to,
         hours_decimal: parsed.hours,
         project_name:  projectStr || null,
+        stage_name:    stageStr   || null,  // validation only, stripped before DB insert
+        row_number:    i + 1,               // Excel row for violation reporting, stripped before DB insert
         task,
       })
     }
