@@ -1,11 +1,5 @@
 const { createClient } = require('@supabase/supabase-js')
 
-const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-)
-
 const headers = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -17,6 +11,15 @@ exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method not allowed' }) }
 
   try {
+    const SUPABASE_URL = process.env.SUPABASE_URL
+    const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!SUPABASE_URL || !SERVICE_KEY) {
+      return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server misconfigured: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY are not set on this deploy. Add them in Netlify → Site settings → Environment variables and redeploy.' }) }
+    }
+    const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+
     // Verify caller is an IT admin
     const token = (event.headers.authorization || '').replace('Bearer ', '')
     const { data: { user: caller }, error: authErr } = await supabaseAdmin.auth.getUser(token)
