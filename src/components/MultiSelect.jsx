@@ -94,9 +94,9 @@ export default function MultiSelect({
                   >
                     <span className={clsx(
                       'w-4 h-4 rounded border flex items-center justify-center flex-shrink-0',
-                      sel ? 'bg-gray-900 dark:bg-gray-100 border-gray-900 dark:border-gray-100' : 'border-gray-300 dark:border-gray-600'
+                      sel ? 'bg-ae7-red border-ae7-red' : 'border-gray-300 dark:border-gray-600'
                     )}>
-                      {sel && <Check size={11} className="text-white dark:text-gray-900" />}
+                      {sel && <Check size={11} className="text-white" />}
                     </span>
                     <span className="min-w-0">
                       <span className="block truncate">{o.label}</span>

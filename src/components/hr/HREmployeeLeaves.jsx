@@ -70,7 +70,7 @@ export default function HREmployeeLeaves() {
               className={clsx(
                 'px-2.5 py-2 rounded-md text-xs font-medium transition-colors',
                 status === s
-                  ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900'
+                  ? 'bg-ae7-red text-white'
                   : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
               )}
             >

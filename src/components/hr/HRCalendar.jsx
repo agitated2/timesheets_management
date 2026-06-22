@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../lib/supabase'
-import { CalendarDays, Plus, Trash2, Check, Users } from 'lucide-react'
+import { CalendarDays, Plus, Trash2, Check, Users, X } from 'lucide-react'
 import MultiSelect from '../MultiSelect'
+import Pagination from '../Pagination'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
+
+const ASSIGN_PAGE_SIZE = 10
 
 const DOW = [['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]]
 
@@ -20,6 +23,7 @@ export default function HRCalendar() {
   const [holName, setHolName]       = useState('')
   const [assignEmps, setAssignEmps] = useState([])
   const [assignMsg, setAssignMsg]   = useState('')
+  const [assignPage, setAssignPage] = useState(1)
 
   const load = useCallback(async () => {
     const [cals, profs, assigns] = await Promise.all([
@@ -95,6 +99,27 @@ export default function HRCalendar() {
     load()
   }
 
+  // Remove an explicit assignment → employee falls back to the default calendar.
+  async function unassign(empId) {
+    const { error } = await supabase.from('calendar_assignments').delete().eq('employee_id', empId)
+    if (error) { alert(error.message); return }
+    load()
+  }
+
+  // Employees on the selected calendar. The default calendar implicitly holds
+  // everyone without an explicit assignment elsewhere.
+  const assignedHere = useMemo(() => {
+    if (!selected) return []
+    return employees.filter(e => {
+      const a = assignments.find(x => x.employee_id === e.id)
+      return selected.is_default ? (!a || a.calendar_id === selected.id) : (a && a.calendar_id === selected.id)
+    })
+  }, [employees, assignments, selected])
+
+  const assignTotalPages = Math.max(1, Math.ceil(assignedHere.length / ASSIGN_PAGE_SIZE))
+  const assignCurrent    = Math.min(assignPage, assignTotalPages)
+  const assignShown      = assignedHere.slice((assignCurrent - 1) * ASSIGN_PAGE_SIZE, assignCurrent * ASSIGN_PAGE_SIZE)
+
   if (loading) return <div className="card p-12 text-center text-sm text-gray-400">Loading…</div>
 
   return (
@@ -107,7 +132,7 @@ export default function HRCalendar() {
         </div>
         <div className="divide-y divide-gray-100 dark:divide-gray-800">
           {calendars.map(c => (
-            <button key={c.id} onClick={() => setSelectedId(c.id)}
+            <button key={c.id} onClick={() => { setSelectedId(c.id); setAssignPage(1) }}
               className={clsx('w-full text-left px-5 py-3 text-sm transition-colors',
                 selectedId === c.id ? 'bg-gray-100 dark:bg-gray-800 font-medium' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50')}>
               {c.name}
@@ -134,7 +159,7 @@ export default function HRCalendar() {
                 return (
                   <button key={dow} onClick={() => toggleWeekend(dow)}
                     className={clsx('px-3 py-2 rounded-md text-sm font-medium border transition-colors',
-                      on ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 border-gray-900 dark:border-gray-100'
+                      on ? 'bg-ae7-red text-white border-ae7-red'
                          : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800')}>
                     {label}
                   </button>
@@ -181,6 +206,39 @@ export default function HRCalendar() {
               </button>
             </form>
             {assignMsg && <p className={clsx('text-xs', assignMsg.includes('Assigned') ? 'text-emerald-600' : 'text-red-500')}>{assignMsg}</p>}
+          </div>
+
+          {/* Employees on this calendar */}
+          <div className="card overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center gap-2">
+              <Users size={15} className="text-gray-400" />
+              <h3 className="font-semibold text-sm">Employees on {selected.name}</h3>
+              <span className="text-xs text-gray-400">{assignedHere.length}</span>
+            </div>
+            {assignedHere.length === 0 ? (
+              <p className="text-sm text-gray-400 text-center py-6">No employees on this calendar.</p>
+            ) : (
+              <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                {assignShown.map(e => {
+                  const explicit = assignments.some(a => a.employee_id === e.id && a.calendar_id === selected.id)
+                  return (
+                    <div key={e.id} className="flex items-center justify-between gap-3 px-5 py-2.5">
+                      <div className="min-w-0">
+                        <p className="text-sm truncate">{e.full_name || e.email}</p>
+                        {selected.is_default && !explicit && <p className="text-xs text-gray-400">default (unassigned)</p>}
+                      </div>
+                      {!selected.is_default && (
+                        <button onClick={() => unassign(e.id)} title="Move back to default calendar"
+                          className="text-xs text-gray-500 hover:text-red-500 flex items-center gap-1">
+                          <X size={12} /> Unassign
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <Pagination page={assignCurrent} totalPages={assignTotalPages} onChange={setAssignPage} total={assignedHere.length} />
           </div>
         </div>
       )}

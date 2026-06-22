@@ -3,7 +3,7 @@ import { NavLink, Link, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Clock, BarChart2, CheckSquare,
   Shield, LogOut, Sun, Moon, Menu, X, Settings, Briefcase,
-  CalendarDays, HeartHandshake
+  CalendarDays, HeartHandshake, Users
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -79,6 +79,9 @@ export default function Navbar() {
     hasRole('hr_manage_calendar') || hasRole('hr_approve_requests') || hasRole('it')
   ) {
     links.push({ to: '/hr', icon: CalendarDays, label: 'HR Panel' })
+  }
+  if (hasRole('employee_overview') || hasRole('it')) {
+    links.push({ to: '/employees', icon: Users, label: 'Employees' })
   }
   if (hasRole('global_analytics') || hasRole('team_analytics')) {
     links.push({ to: '/analytics', icon: BarChart2, label: 'Analytics' })

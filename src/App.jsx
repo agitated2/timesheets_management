@@ -17,6 +17,7 @@ import SettingsPage from './pages/SettingsPage'
 import ProjectsPage from './pages/ProjectsPage'
 import RequestsPage from './pages/RequestsPage'
 import HRPanelPage from './pages/HRPanelPage'
+import EmployeeOverviewPage from './pages/EmployeeOverviewPage'
 import AuthCallback from './pages/AuthCallback'
 
 function RoleGate({ allow, children }) {
@@ -61,6 +62,9 @@ function AppRoutes() {
 
           {/* HR Panel — any HR flag or IT */}
           <Route path="/hr"          element={<RoleGate allow={['hr_view_timesheets','hr_manage_policies','hr_manage_calendar','hr_approve_requests','it']}><HRPanelPage /></RoleGate>} />
+
+          {/* Employee Overview — dedicated role or IT */}
+          <Route path="/employees"   element={<RoleGate allow={['employee_overview','it']}><EmployeeOverviewPage /></RoleGate>} />
 
           {/* Projects */}
           <Route path="/projects"    element={<RoleGate allow={['projects_control','it']}><ProjectsPage /></RoleGate>} />

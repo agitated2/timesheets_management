@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
+import Tabs from '../components/Tabs'
 
 const PAGE_SIZE = 10
 
@@ -904,20 +905,7 @@ export default function ProjectsPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2">
-        {tabs.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setActiveTab(t.id)}
-            className={clsx(
-              'px-4 py-2 rounded-xl text-sm font-medium transition-colors',
-              activeTab === t.id ? 'bg-ae7-red text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <Tabs tabs={tabs.map(t => ({ key: t.id, label: t.label }))} active={activeTab} onChange={setActiveTab} />
 
       {activeTab === 'projects' && (
         <>

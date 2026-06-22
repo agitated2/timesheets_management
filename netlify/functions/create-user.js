@@ -23,8 +23,9 @@ exports.handler = async (event) => {
     if (authErr || !caller) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) }
 
     const { data: callerProfile } = await supabaseAdmin
-      .from('profiles').select('roles').eq('id', caller.id).single()
-    if (!callerProfile?.roles?.includes('it')) return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT role required' }) }
+      .from('profiles').select('roles, role').eq('id', caller.id).single()
+    const callerIsIT = callerProfile?.roles?.includes('it') || callerProfile?.role === 'it'
+    if (!callerIsIT) return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT role required' }) }
 
     const { email, password, fullName, roles } = JSON.parse(event.body || '{}')
 

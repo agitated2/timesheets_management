@@ -6,7 +6,10 @@ import {
   CheckCircle, XCircle, Ban, AlertTriangle, Check, Inbox,
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
+import Pagination from '../components/Pagination'
 import clsx from 'clsx'
+
+const PAGE_SIZE = 10
 
 export const LEAVE_STATUS = {
   pending_manager: { label: 'Pending manager', icon: Hourglass,   cls: 'text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-400' },
@@ -97,7 +100,7 @@ function NewRequestModal({ categories, onClose, onSubmitted }) {
                   className={clsx(
                     'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium border transition-colors',
                     unit === v
-                      ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 border-gray-900 dark:border-gray-100'
+                      ? 'bg-ae7-red text-white border-ae7-red'
                       : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'
                   )}
                 >
@@ -214,25 +217,24 @@ function ApprovalCard({ req, onDecided }) {
 export default function RequestsPage() {
   const { profile, hasRole } = useAuth()
   const [categories, setCategories] = useState([])
-  const [balances, setBalances]     = useState([])
   const [requests, setRequests]     = useState([])
   const [approvals, setApprovals]   = useState([])
   const [loading, setLoading]       = useState(true)
   const [showNew, setShowNew]       = useState(false)
+  const [minePage, setMinePage]     = useState(1)
+  const [apprPage, setApprPage]     = useState(1)
 
   const isManager = hasRole('manager') || hasRole('c_suite') || hasRole('it')
 
   const load = useCallback(async () => {
-    const [cats, bals, reqs] = await Promise.all([
+    const [cats, reqs] = await Promise.all([
       supabase.from('leave_categories').select('*').eq('is_active', true).order('name'),
-      supabase.from('leave_balance_summary').select('*').eq('employee_id', profile.id),
       supabase.from('leave_requests')
         .select('*, leave_categories(name, is_paid)')
         .eq('employee_id', profile.id)
         .order('created_at', { ascending: false }),
     ])
     setCategories(cats.data || [])
-    setBalances(bals.data || [])
     setRequests(reqs.data || [])
 
     if (isManager) {
@@ -254,30 +256,25 @@ export default function RequestsPage() {
     load()
   }
 
+  const apprTotalPages = Math.max(1, Math.ceil(approvals.length / PAGE_SIZE))
+  const apprCurrent    = Math.min(apprPage, apprTotalPages)
+  const apprShown      = approvals.slice((apprCurrent - 1) * PAGE_SIZE, apprCurrent * PAGE_SIZE)
+
+  const mineTotalPages = Math.max(1, Math.ceil(requests.length / PAGE_SIZE))
+  const mineCurrent    = Math.min(minePage, mineTotalPages)
+  const mineShown      = requests.slice((mineCurrent - 1) * PAGE_SIZE, mineCurrent * PAGE_SIZE)
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center justify-between gap-3 flex-wrap lg:pr-14">
         <div>
           <h1 className="page-title">Requests</h1>
-          <p className="page-subtitle">Apply for leave, view your balances, and track approvals.</p>
+          <p className="page-subtitle">Submit and track your requests — leave, WFH and more.</p>
         </div>
         <button onClick={() => setShowNew(true)} className="btn-primary">
           <Plus size={15} /> New request
         </button>
       </div>
-
-      {/* Balances */}
-      {balances.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {balances.map(b => (
-            <div key={b.category_id} className="card p-4">
-              <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 truncate">{b.category_name}</p>
-              <p className="text-2xl font-semibold tabular-nums mt-1">{Number(b.remaining)}<span className="text-sm text-gray-400 font-normal"> / {Number(b.allowance)}</span></p>
-              <p className="text-xs text-gray-400 mt-0.5">{Number(b.used)} day{Number(b.used) === 1 ? '' : 's'} used</p>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Manager approval queue */}
       {isManager && approvals.length > 0 && (
@@ -288,8 +285,9 @@ export default function RequestsPage() {
             <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full">{approvals.length}</span>
           </div>
           <div className="divide-y divide-gray-100 dark:divide-gray-800">
-            {approvals.map(r => <ApprovalCard key={r.id} req={r} onDecided={load} />)}
+            {apprShown.map(r => <ApprovalCard key={r.id} req={r} onDecided={load} />)}
           </div>
+          <Pagination page={apprCurrent} totalPages={apprTotalPages} onChange={setApprPage} total={approvals.length} />
         </div>
       )}
 
@@ -307,7 +305,7 @@ export default function RequestsPage() {
           </div>
         ) : (
           <div className="divide-y divide-gray-100 dark:divide-gray-800">
-            {requests.map(r => (
+            {mineShown.map(r => (
               <div key={r.id} className="flex items-center justify-between gap-3 px-5 py-3.5">
                 <div className="min-w-0">
                   <p className="text-sm font-medium truncate">
@@ -333,6 +331,7 @@ export default function RequestsPage() {
             ))}
           </div>
         )}
+        <Pagination page={mineCurrent} totalPages={mineTotalPages} onChange={setMinePage} total={requests.length} />
       </div>
 
       {showNew && (

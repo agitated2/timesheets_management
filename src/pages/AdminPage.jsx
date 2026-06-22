@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
+import Tabs from '../components/Tabs'
 
 const PAGE_SIZE = 10
 
@@ -31,6 +32,7 @@ function Pagination({ page, totalPages, onChange }) {
 const ROLES = [
   'employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control',
   'hr_view_timesheets', 'hr_manage_policies', 'hr_manage_calendar', 'hr_approve_requests',
+  'employee_overview',
 ]
 
 const roleDisplay = {
@@ -46,6 +48,7 @@ const roleDisplay = {
   hr_manage_policies:  'HR · Manage Policies',
   hr_manage_calendar:  'HR · Manage Calendar',
   hr_approve_requests: 'HR · Approve Requests',
+  employee_overview:   'Employee Overview',
 }
 
 const roleBadge = {
@@ -61,6 +64,7 @@ const roleBadge = {
   hr_manage_policies:  'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
   hr_manage_calendar:  'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
   hr_approve_requests: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  employee_overview:   'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
 }
 
 const statusBadge = {
@@ -559,22 +563,11 @@ export default function AdminPage() {
         <p className="page-subtitle">Manage users, roles, timesheets, and override decisions.</p>
       </div>
 
-      <div className="flex gap-2">
-        {['users', 'timesheets'].map(t => (
-          <button
-            key={t}
-            onClick={() => setActiveTab(t)}
-            className={clsx(
-              'px-4 py-2 rounded-xl text-sm font-medium transition-colors capitalize',
-              activeTab === t
-                ? 'bg-ae7-red text-white'
-                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
-            )}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        tabs={[{ key: 'users', label: 'Users' }, { key: 'timesheets', label: 'Timesheets' }]}
+        active={activeTab}
+        onChange={setActiveTab}
+      />
 
       {activeTab === 'users' && (
         <>

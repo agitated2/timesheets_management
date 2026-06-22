@@ -21,12 +21,14 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 --   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_manage_policies';
 --   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_manage_calendar';
 --   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_approve_requests';
+--   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'employee_overview';
 --   ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'leave';
 DO $$ BEGIN
   CREATE TYPE user_role AS ENUM (
     'employee', 'manager', 'hr', 'c_suite', 'it',
     'global_analytics', 'team_analytics', 'projects_control',
-    'hr_view_timesheets', 'hr_manage_policies', 'hr_manage_calendar', 'hr_approve_requests'
+    'hr_view_timesheets', 'hr_manage_policies', 'hr_manage_calendar', 'hr_approve_requests',
+    'employee_overview'
   );
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
@@ -980,10 +982,7 @@ DROP POLICY IF EXISTS "leave_bal_read_privileged" ON public.leave_balances;
 CREATE POLICY "leave_bal_read_own" ON public.leave_balances
   FOR SELECT USING (employee_id = auth.uid());
 CREATE POLICY "leave_bal_read_privileged" ON public.leave_balances
-  FOR SELECT USING (
-    public.my_has_role('hr_manage_policies') OR public.my_has_role('hr_view_timesheets')
-    OR public.my_has_role('hr_approve_requests') OR public.my_has_role('it')
-  );
+  FOR SELECT USING (public.has_any_hr_flag() OR public.my_has_role('it'));
 
 -- ---- LEAVE REQUESTS ---- (reads; all writes go through SECURITY DEFINER RPCs)
 DROP POLICY IF EXISTS "leave_req_read_own"        ON public.leave_requests;
@@ -994,10 +993,7 @@ CREATE POLICY "leave_req_read_own" ON public.leave_requests
 CREATE POLICY "leave_req_read_manager" ON public.leave_requests
   FOR SELECT USING (public.i_manage(employee_id));
 CREATE POLICY "leave_req_read_privileged" ON public.leave_requests
-  FOR SELECT USING (
-    public.my_has_role('hr_view_timesheets') OR public.my_has_role('hr_approve_requests')
-    OR public.my_has_role('hr_manage_policies') OR public.my_has_role('it')
-  );
+  FOR SELECT USING (public.has_any_hr_flag() OR public.my_has_role('it'));
 
 -- ---- CALENDARS / HOLIDAYS ---- (readable by all authenticated; HR/IT manage)
 DROP POLICY IF EXISTS "cal_read"   ON public.holiday_calendars;
@@ -1022,7 +1018,9 @@ DROP POLICY IF EXISTS "cal_assign_manage"          ON public.calendar_assignment
 CREATE POLICY "cal_assign_read_own" ON public.calendar_assignments
   FOR SELECT USING (employee_id = auth.uid());
 CREATE POLICY "cal_assign_read_privileged" ON public.calendar_assignments
-  FOR SELECT USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
+  FOR SELECT USING (
+    public.my_has_role('hr_manage_calendar') OR public.my_has_role('employee_overview') OR public.my_has_role('it')
+  );
 CREATE POLICY "cal_assign_manage" ON public.calendar_assignments
   FOR ALL USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'))
   WITH CHECK (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
@@ -1039,8 +1037,14 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   SELECT public.my_has_role('hr_view_timesheets')
       OR public.my_has_role('hr_manage_policies')
       OR public.my_has_role('hr_manage_calendar')
-      OR public.my_has_role('hr_approve_requests');
+      OR public.my_has_role('hr_approve_requests')
+      OR public.my_has_role('employee_overview');
 $$;
+
+-- Project memberships readable by HR-flag holders (Employee Overview needs this)
+DROP POLICY IF EXISTS "members_read_privileged" ON public.project_members;
+CREATE POLICY "members_read_privileged" ON public.project_members
+  FOR SELECT USING (public.has_any_hr_flag());
 
 -- Profiles: any HR-flag holder can read all profiles (employee pickers, names)
 DROP POLICY IF EXISTS "profiles_read_hr_flags" ON public.profiles;

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { FileText, Inbox, Users, Tags, CalendarDays, ShieldAlert } from 'lucide-react'
-import clsx from 'clsx'
+import Tabs from '../components/Tabs'
 import HRTimesheets from '../components/hr/HRTimesheets'
 import HRApprovals from '../components/hr/HRApprovals'
 import HREmployeeLeaves from '../components/hr/HREmployeeLeaves'
@@ -35,25 +35,7 @@ export default function HRPanelPage() {
         <p className="page-subtitle">Manage leaves, policies, calendars, and review timesheets.</p>
       </div>
 
-      <div className="flex gap-1 overflow-x-auto border-b border-gray-200 dark:border-gray-800 -mb-px">
-        {tabs.map(t => {
-          const Icon = t.icon
-          return (
-            <button
-              key={t.key}
-              onClick={() => setActive(t.key)}
-              className={clsx(
-                'flex items-center gap-1.5 px-3.5 py-2.5 text-sm font-medium border-b-2 whitespace-nowrap transition-colors',
-                active === t.key
-                  ? 'border-gray-900 dark:border-gray-100 text-gray-900 dark:text-gray-100'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'
-              )}
-            >
-              <Icon size={15} /> {t.label}
-            </button>
-          )
-        })}
-      </div>
+      <Tabs tabs={tabs} active={active} onChange={setActive} />
 
       {ActiveComp ? <ActiveComp /> : <p className="text-sm text-gray-400">No sections available.</p>}
     </div>

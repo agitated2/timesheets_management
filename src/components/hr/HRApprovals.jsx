@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Inbox, Check, XCircle } from 'lucide-react'
 import { StatusBadge, leaveRange } from '../../pages/RequestsPage'
+import Pagination from '../Pagination'
+
+const PAGE_SIZE = 10
 
 function HRDecisionCard({ req, onDecided }) {
   const [busy, setBusy]           = useState(false)
@@ -60,6 +63,7 @@ function HRDecisionCard({ req, onDecided }) {
 export default function HRApprovals() {
   const [reqs, setReqs]       = useState([])
   const [loading, setLoading] = useState(true)
+  const [page, setPage]       = useState(1)
 
   const load = useCallback(async () => {
     const { data } = await supabase.from('leave_requests')
@@ -71,6 +75,10 @@ export default function HRApprovals() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  const totalPages = Math.max(1, Math.ceil(reqs.length / PAGE_SIZE))
+  const current    = Math.min(page, totalPages)
+  const shown      = reqs.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
 
   return (
     <div className="card overflow-hidden">
@@ -89,9 +97,12 @@ export default function HRApprovals() {
           <p className="text-sm text-gray-500">Nothing awaiting your approval.</p>
         </div>
       ) : (
-        <div className="divide-y divide-gray-100 dark:divide-gray-800">
-          {reqs.map(r => <HRDecisionCard key={r.id} req={r} onDecided={load} />)}
-        </div>
+        <>
+          <div className="divide-y divide-gray-100 dark:divide-gray-800">
+            {shown.map(r => <HRDecisionCard key={r.id} req={r} onDecided={load} />)}
+          </div>
+          <Pagination page={current} totalPages={totalPages} onChange={setPage} total={reqs.length} />
+        </>
       )}
     </div>
   )
