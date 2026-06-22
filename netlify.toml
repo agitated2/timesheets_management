@@ -7,7 +7,10 @@
   # Node 22 ships a native global WebSocket, which @supabase/supabase-js's
   # realtime client requires. On Node 18 every function that calls createClient
   # crashes with "Node.js 18 detected without native WebSocket support".
+  # NODE_VERSION sets the BUILD runtime; AWS_LAMBDA_JS_RUNTIME sets the deployed
+  # FUNCTION runtime (these are separate — both must be 22).
   NODE_VERSION = "22"
+  AWS_LAMBDA_JS_RUNTIME = "nodejs22.x"
 
 [[redirects]]
   from = "/*"
