@@ -4,7 +4,10 @@
   functions = "netlify/functions"
 
 [build.environment]
-  NODE_VERSION = "18"
+  # Node 22 ships a native global WebSocket, which @supabase/supabase-js's
+  # realtime client requires. On Node 18 every function that calls createClient
+  # crashes with "Node.js 18 detected without native WebSocket support".
+  NODE_VERSION = "22"
 
 [[redirects]]
   from = "/*"
