@@ -99,17 +99,26 @@ function CreateUserModal({ onClose, onCreated }) {
     if (password !== confirmPw) { setError('Passwords do not match.'); return }
     if (roles.length === 0) { setError('Select at least one role.'); return }
     setLoading(true)
-    const session = await getSession()
-    const res = await fetch('/.netlify/functions/create-user', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles }),
-    })
-    const json = await res.json()
-    setLoading(false)
-    if (!res.ok) { setError(json.error); return }
-    onCreated()
-    onClose()
+    try {
+      const session = await getSession()
+      const res = await fetch('/.netlify/functions/create-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(json.error || `Server error ${res.status}. Creating users needs the Netlify functions — run "netlify dev" locally or use the deployed site.`)
+        setLoading(false)
+        return
+      }
+      setLoading(false)
+      onCreated()
+      onClose()
+    } catch (err) {
+      setError(`Could not reach the server: ${err.message}. Creating users needs the Netlify functions — run "netlify dev" locally instead of "npm run dev".`)
+      setLoading(false)
+    }
   }
 
   return (
@@ -205,23 +214,52 @@ function EditUserModal({ user: target, onClose, onSaved }) {
     setError('')
     setLoading(true)
 
-    const session = await getSession()
-    const body = { userId: target.id }
-    if (email.trim().toLowerCase() !== target.email)                                     body.email      = email.trim().toLowerCase()
-    if (fullName.trim() !== (target.full_name || ''))                                    body.fullName   = fullName.trim()
-    if (JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort()))   body.roles      = roles
-    if (JSON.stringify([...managerIds].sort()) !== JSON.stringify([...targetManagerIds].sort())) body.managerIds = managerIds
-    if (newPassword)                                                                      body.newPassword = newPassword
+    const emailChanged    = email.trim().toLowerCase() !== target.email
+    const nameChanged     = fullName.trim() !== (target.full_name || '')
+    const rolesChanged    = JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort())
+    const managersChanged = JSON.stringify([...managerIds].sort()) !== JSON.stringify([...targetManagerIds].sort())
 
-    const res = await fetch('/.netlify/functions/update-user', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify(body),
-    })
-    const json = await res.json()
+    // Profile-level fields (name, roles, managers) — IT can write these directly
+    // via RLS (profiles_update_it). No serverless function required.
+    const patch = {}
+    if (nameChanged)     patch.full_name   = fullName.trim() || null
+    if (rolesChanged)    patch.roles       = roles
+    if (managersChanged) patch.manager_ids = managerIds
+
+    if (Object.keys(patch).length > 0) {
+      const { error: upErr } = await supabase.from('profiles').update(patch).eq('id', target.id)
+      if (upErr) { setError(upErr.message); setLoading(false); return }
+    }
+
+    // Email / password change the auth user — these need the admin function.
+    if (emailChanged || newPassword) {
+      try {
+        const session = await getSession()
+        const body = { userId: target.id }
+        if (emailChanged) body.email = email.trim().toLowerCase()
+        if (newPassword)  body.newPassword = newPassword
+        const res = await fetch('/.netlify/functions/update-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify(body),
+        })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(json.error || `Server error ${res.status}`)
+      } catch (err) {
+        setError(`Saved profile changes, but email/password update failed: ${err.message}. (Email & password changes require the Netlify functions — run "netlify dev" locally or use the deployed site.)`)
+        setLoading(false)
+        return
+      }
+    }
+
     setLoading(false)
-    if (!res.ok) { setError(json.error); return }
-    onSaved({ ...target, email: body.email ?? target.email, full_name: body.fullName ?? target.full_name, roles: body.roles ?? target.roles, manager_ids: body.managerIds ?? target.manager_ids })
+    onSaved({
+      ...target,
+      email: emailChanged ? email.trim().toLowerCase() : target.email,
+      full_name: nameChanged ? (fullName.trim() || null) : target.full_name,
+      roles: rolesChanged ? roles : target.roles,
+      manager_ids: managersChanged ? managerIds : target.manager_ids,
+    })
     onClose()
   }
 
