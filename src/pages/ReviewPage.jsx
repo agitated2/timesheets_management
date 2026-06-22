@@ -27,7 +27,7 @@ export default function ReviewPage() {
   useEffect(() => {
     async function load() {
       const [{ data: sheet }, { data: ents }] = await Promise.all([
-        supabase.from('timesheets').select('*, profiles!employee_id(*)').eq('id', id).single(),
+        supabase.from('timesheets').select('*, profiles!employee_id(*), reviewer:profiles!reviewer_id(full_name, email)').eq('id', id).single(),
         supabase.from('timesheet_entries').select('*').eq('timesheet_id', id).order('time_from'),
       ])
       if (sheet) { setTs(sheet); setEmployee(sheet.profiles) }
@@ -129,6 +129,15 @@ export default function ReviewPage() {
               <p className="text-sm text-red-700 dark:text-red-300">{ts.rejection_reason}</p>
             </div>
           </div>
+        )}
+
+        {ts.status !== 'pending' && ts.reviewer_id && (
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {ts.status === 'approved' ? 'Approved' : 'Rejected'} by{' '}
+            <span className="font-medium text-gray-700 dark:text-gray-300">
+              {ts.reviewer_id === profile.id ? 'You' : (ts.reviewer?.full_name || ts.reviewer?.email || 'a reviewer')}
+            </span>
+          </p>
         )}
 
         <button onClick={downloadFile} className="btn-secondary text-sm gap-2">

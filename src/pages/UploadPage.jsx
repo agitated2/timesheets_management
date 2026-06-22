@@ -131,8 +131,9 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
     days, totalDays, totalHours,
     discrepancies = [], hasDiscrepancies = false,
     projectViolations = [], hasProjectViolations = false,
+    leaveViolations = [], hasLeaveViolations = false,
   } = preview
-  const blocked = hasDiscrepancies || hasProjectViolations
+  const blocked = hasDiscrepancies || hasProjectViolations || hasLeaveViolations
   const [expandedDay, setExpandedDay] = useState(null)
   const isMulti   = totalDays > 1
   const dateRange = isMulti
@@ -237,6 +238,33 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400">
               Resolve the project/stage issues in your Excel file and re-upload. Contact your line manager if needed.
+            </p>
+          </div>
+        )}
+
+        {/* ── Leave conflicts ──────────────────────────────── */}
+        {hasLeaveViolations && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {leaveViolations.length} approved-leave conflict{leaveViolations.length !== 1 ? 's' : ''}
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {leaveViolations.map((v, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <p className="font-medium text-gray-800 dark:text-gray-200">
+                    {format(parseISO(v.date), 'EEE, MMM d, yyyy')}
+                    {v.type === 'leave_hours' && v.timeRange && <span className="text-gray-500"> · {v.timeRange}</span>}
+                  </p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    {v.type === 'leave_day'
+                      ? 'You have an approved full-day leave on this date.'
+                      : 'This entry overlaps an approved hourly leave.'}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              You have an approved leave for this date range. Please adjust your timesheet entries.
             </p>
           </div>
         )}
@@ -425,12 +453,19 @@ function InAppEntry({ profile, onBack, onSuccess }) {
           time_to:       e.timeTo    || null,
           hours_decimal: hrs,
           project_name:  proj?.name  || null,
+          project_id:    proj?.id    || null,
+          stage_id:      stage?.id   || null,
           task:          [stage?.name, e.task].filter(Boolean).join(' — ') || null,
         }
       })
 
       const { error: entErr } = await supabase.from('timesheet_entries').insert(entries)
-      if (entErr) { setSubmitError(entErr.message); setSubmitting(false); return }
+      if (entErr) {
+        // Roll back the just-created timesheet so a leave-blocked entry
+        // (or any failure) never leaves an empty timesheet behind.
+        await supabase.from('timesheets').delete().eq('id', ts.id)
+        setSubmitError(entErr.message); setSubmitting(false); return
+      }
 
       resultDays.push({
         date:    de.date,

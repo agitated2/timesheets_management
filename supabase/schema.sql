@@ -13,8 +13,21 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Custom types
+-- NOTE: the granular hr_* values are the HR-Panel permission flags. On a FRESH
+-- install they are created inline below. If UPGRADING an existing database, run
+-- these once FIRST, on their own (ADD VALUE cannot be used in the same
+-- transaction that creates it):
+--   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_view_timesheets';
+--   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_manage_policies';
+--   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_manage_calendar';
+--   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'hr_approve_requests';
+--   ALTER TYPE notification_type ADD VALUE IF NOT EXISTS 'leave';
 DO $$ BEGIN
-  CREATE TYPE user_role AS ENUM ('employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control');
+  CREATE TYPE user_role AS ENUM (
+    'employee', 'manager', 'hr', 'c_suite', 'it',
+    'global_analytics', 'team_analytics', 'projects_control',
+    'hr_view_timesheets', 'hr_manage_policies', 'hr_manage_calendar', 'hr_approve_requests'
+  );
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 DO $$ BEGIN
@@ -26,7 +39,17 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 DO $$ BEGIN
-  CREATE TYPE notification_type AS ENUM ('submission', 'approval', 'rejection');
+  CREATE TYPE notification_type AS ENUM ('submission', 'approval', 'rejection', 'leave');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE leave_unit AS ENUM ('daily', 'hourly');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE leave_request_status AS ENUM (
+    'pending_manager', 'pending_hr', 'approved', 'rejected', 'cancelled', 'revoked'
+  );
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 -- ---------------------------------------------------------------
@@ -522,3 +545,522 @@ USING (
   AND public.my_role() IN ('hr', 'c_suite', 'it')
 );
 */
+
+-- ===============================================================
+-- HR PANEL · LEAVES · REQUESTS · CALENDAR
+-- ===============================================================
+
+-- Link timesheet entries to canonical project / stage rows (additive; nullable).
+-- These let the HR review page filter by project and stage reliably instead of
+-- by free text. Populated by the upload paths going forward; legacy rows stay NULL.
+ALTER TABLE public.timesheet_entries
+  ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES public.projects(id)       ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS stage_id   UUID REFERENCES public.project_stages(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entries_project_id ON public.timesheet_entries(project_id);
+CREATE INDEX IF NOT EXISTS idx_entries_stage_id   ON public.timesheet_entries(stage_id);
+
+-- ---------------------------------------------------------------
+-- TABLES
+-- ---------------------------------------------------------------
+
+-- Dynamic leave categories created by HR (Paid, Sick, Unpaid, Study, …)
+CREATE TABLE IF NOT EXISTS public.leave_categories (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        TEXT NOT NULL,
+  is_paid     BOOLEAN NOT NULL DEFAULT true,   -- false = record-only, no balance deduction
+  is_active   BOOLEAN NOT NULL DEFAULT true,
+  created_by  UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leave_categories_name_lower ON public.leave_categories(lower(name));
+
+-- Per-employee, per-category allowance (in days). HR sets this manually.
+-- Usage is computed (allowance − Σ approved days_count), never mutated in place.
+CREATE TABLE IF NOT EXISTS public.leave_balances (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id UUID NOT NULL REFERENCES public.profiles(id)        ON DELETE CASCADE,
+  category_id UUID NOT NULL REFERENCES public.leave_categories(id) ON DELETE CASCADE,
+  allowance   NUMERIC(7,2) NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (employee_id, category_id)
+);
+
+-- Leave / WFH / misc requests with two-tier approval pipeline.
+CREATE TABLE IF NOT EXISTS public.leave_requests (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id       UUID NOT NULL REFERENCES public.profiles(id)        ON DELETE CASCADE,
+  category_id       UUID NOT NULL REFERENCES public.leave_categories(id) ON DELETE RESTRICT,
+  unit              leave_unit NOT NULL,
+  start_date        DATE NOT NULL,
+  end_date          DATE NOT NULL,                 -- = start_date for hourly
+  start_time        TIME,                          -- hourly only
+  end_time          TIME,                          -- hourly only
+  reason            TEXT,
+  status            leave_request_status NOT NULL DEFAULT 'pending_manager',
+  days_count        NUMERIC(7,2) NOT NULL DEFAULT 0,  -- working-day equivalent deducted from balance
+  tier1_approver_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  tier1_at          TIMESTAMPTZ,
+  hr_approver_id    UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  hr_at             TIMESTAMPTZ,
+  rejection_reason  TEXT,
+  revoked_by        UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  revoked_at        TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_leave_requests_employee ON public.leave_requests(employee_id);
+CREATE INDEX IF NOT EXISTS idx_leave_requests_status   ON public.leave_requests(status);
+CREATE INDEX IF NOT EXISTS idx_leave_requests_dates    ON public.leave_requests(start_date, end_date);
+
+-- Holiday / weekend calendars. weekend_days uses Postgres DOW (0=Sun … 6=Sat).
+-- Company default is Friday/Saturday = {5,6}.
+CREATE TABLE IF NOT EXISTS public.holiday_calendars (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         TEXT NOT NULL,
+  weekend_days INT[] NOT NULL DEFAULT '{5,6}',
+  is_default   BOOLEAN NOT NULL DEFAULT false,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One calendar per employee (multi-select assignment expands to rows here).
+-- Unassigned employees fall back to the default calendar.
+CREATE TABLE IF NOT EXISTS public.calendar_assignments (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  calendar_id UUID NOT NULL REFERENCES public.holiday_calendars(id) ON DELETE CASCADE,
+  employee_id UUID NOT NULL REFERENCES public.profiles(id)          ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (employee_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.public_holidays (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  calendar_id UUID NOT NULL REFERENCES public.holiday_calendars(id) ON DELETE CASCADE,
+  date        DATE NOT NULL,
+  name        TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (calendar_id, date)
+);
+
+-- Seed a single default calendar (Fri/Sat weekend).
+INSERT INTO public.holiday_calendars (name, weekend_days, is_default)
+SELECT 'Company Default', '{5,6}', true
+WHERE NOT EXISTS (SELECT 1 FROM public.holiday_calendars WHERE is_default);
+
+CREATE INDEX IF NOT EXISTS idx_cal_assign_employee ON public.calendar_assignments(employee_id);
+CREATE INDEX IF NOT EXISTS idx_public_holidays_cal ON public.public_holidays(calendar_id, date);
+
+-- updated_at triggers
+DROP TRIGGER IF EXISTS leave_categories_updated_at ON public.leave_categories;
+CREATE TRIGGER leave_categories_updated_at BEFORE UPDATE ON public.leave_categories
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS leave_requests_updated_at ON public.leave_requests;
+CREATE TRIGGER leave_requests_updated_at BEFORE UPDATE ON public.leave_requests
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS holiday_calendars_updated_at ON public.holiday_calendars;
+CREATE TRIGGER holiday_calendars_updated_at BEFORE UPDATE ON public.holiday_calendars
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---------------------------------------------------------------
+-- CALENDAR / WORKING-DAY HELPERS
+-- ---------------------------------------------------------------
+
+-- Resolve an employee's effective calendar (assigned, else default).
+CREATE OR REPLACE FUNCTION public.emp_calendar(emp UUID)
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT calendar_id FROM public.calendar_assignments WHERE employee_id = emp),
+    (SELECT id FROM public.holiday_calendars WHERE is_default LIMIT 1)
+  );
+$$;
+
+-- True when the date is a normal working day for that employee
+-- (not a weekend per their calendar, not a public holiday).
+CREATE OR REPLACE FUNCTION public.is_working_day(emp UUID, d DATE)
+RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_cal UUID; v_weekend INT[];
+BEGIN
+  v_cal := public.emp_calendar(emp);
+  IF v_cal IS NULL THEN
+    RETURN EXTRACT(DOW FROM d)::INT NOT IN (5,6);   -- fallback Fri/Sat
+  END IF;
+  SELECT weekend_days INTO v_weekend FROM public.holiday_calendars WHERE id = v_cal;
+  IF EXTRACT(DOW FROM d)::INT = ANY(v_weekend) THEN RETURN false; END IF;
+  IF EXISTS (SELECT 1 FROM public.public_holidays WHERE calendar_id = v_cal AND date = d) THEN
+    RETURN false;
+  END IF;
+  RETURN true;
+END;
+$$;
+
+-- Count working days in an inclusive date range for an employee.
+CREATE OR REPLACE FUNCTION public.leave_working_days(emp UUID, d_start DATE, d_end DATE)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COUNT(*)::NUMERIC
+  FROM generate_series(d_start, d_end, INTERVAL '1 day') AS g(d)
+  WHERE public.is_working_day(emp, g.d::DATE);
+$$;
+
+-- ---------------------------------------------------------------
+-- TIMESHEET BLOCKING TRIGGERS (enforced for every write path,
+-- including the service-role Netlify upload)
+-- ---------------------------------------------------------------
+
+-- Daily leaves block a whole working day.
+CREATE OR REPLACE FUNCTION public.block_timesheet_on_leave()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF public.is_working_day(NEW.employee_id, NEW.date)
+     AND EXISTS (
+       SELECT 1 FROM public.leave_requests lr
+       WHERE lr.employee_id = NEW.employee_id
+         AND lr.status = 'approved'
+         AND lr.unit = 'daily'
+         AND NEW.date BETWEEN lr.start_date AND lr.end_date
+     ) THEN
+    RAISE EXCEPTION 'You have an approved leave for this date range. Please adjust your timesheet entries.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS timesheets_block_on_leave ON public.timesheets;
+CREATE TRIGGER timesheets_block_on_leave
+  BEFORE INSERT ON public.timesheets
+  FOR EACH ROW EXECUTE FUNCTION public.block_timesheet_on_leave();
+
+-- Hourly leaves block only overlapping entry time windows on that date.
+CREATE OR REPLACE FUNCTION public.block_entry_on_hourly_leave()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_emp UUID; v_date DATE;
+BEGIN
+  IF NEW.time_from IS NULL OR NEW.time_to IS NULL THEN RETURN NEW; END IF;
+  SELECT employee_id, date INTO v_emp, v_date FROM public.timesheets WHERE id = NEW.timesheet_id;
+  IF EXISTS (
+    SELECT 1 FROM public.leave_requests lr
+    WHERE lr.employee_id = v_emp
+      AND lr.status = 'approved'
+      AND lr.unit = 'hourly'
+      AND lr.start_date = v_date
+      AND lr.start_time < NEW.time_to
+      AND lr.end_time   > NEW.time_from
+  ) THEN
+    RAISE EXCEPTION 'You have an approved leave for this date range. Please adjust your timesheet entries.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS entries_block_on_hourly_leave ON public.timesheet_entries;
+CREATE TRIGGER entries_block_on_hourly_leave
+  BEFORE INSERT ON public.timesheet_entries
+  FOR EACH ROW EXECUTE FUNCTION public.block_entry_on_hourly_leave();
+
+-- ---------------------------------------------------------------
+-- REQUEST WORKFLOW RPCs (state machine + permissions centralised)
+-- ---------------------------------------------------------------
+
+-- Notify everyone holding the HR approval (or IT) flag.
+CREATE OR REPLACE FUNCTION public.notify_hr_approvers(p_message TEXT)
+RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  INSERT INTO public.notifications (user_id, type, message)
+  SELECT id, 'leave', p_message FROM public.profiles
+  WHERE 'hr_approve_requests' = ANY(roles) OR 'it' = ANY(roles);
+$$;
+
+CREATE OR REPLACE FUNCTION public.submit_leave_request(
+  p_category UUID, p_unit leave_unit, p_start DATE, p_end DATE,
+  p_start_time TIME, p_end_time TIME, p_reason TEXT
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_emp UUID := auth.uid();
+  v_has_mgr BOOLEAN;
+  v_status leave_request_status;
+  v_days NUMERIC;
+  v_name TEXT;
+  v_id UUID;
+BEGIN
+  IF v_emp IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  IF p_unit = 'hourly' THEN
+    p_end := p_start;
+    IF p_start_time IS NULL OR p_end_time IS NULL OR p_end_time <= p_start_time THEN
+      RAISE EXCEPTION 'Hourly leave needs a valid start and end time on a single date.';
+    END IF;
+    v_days := CASE WHEN public.is_working_day(v_emp, p_start)
+                   THEN round(EXTRACT(EPOCH FROM (p_end_time - p_start_time)) / 3600.0 / 8.0, 2)
+                   ELSE 0 END;
+  ELSE
+    IF p_end < p_start THEN RAISE EXCEPTION 'End date cannot be before start date.'; END IF;
+    v_days := public.leave_working_days(v_emp, p_start, p_end);
+  END IF;
+
+  SELECT cardinality(manager_ids) > 0, COALESCE(full_name, email)
+    INTO v_has_mgr, v_name FROM public.profiles WHERE id = v_emp;
+  v_status := CASE WHEN v_has_mgr THEN 'pending_manager' ELSE 'pending_hr' END;
+
+  INSERT INTO public.leave_requests (
+    employee_id, category_id, unit, start_date, end_date, start_time, end_time, reason, status, days_count
+  ) VALUES (
+    v_emp, p_category, p_unit, p_start, p_end,
+    CASE WHEN p_unit = 'hourly' THEN p_start_time END,
+    CASE WHEN p_unit = 'hourly' THEN p_end_time   END,
+    NULLIF(trim(p_reason), ''), v_status, v_days
+  ) RETURNING id INTO v_id;
+
+  IF v_status = 'pending_manager' THEN
+    INSERT INTO public.notifications (user_id, type, message)
+    SELECT unnest(manager_ids), 'leave', v_name || ' submitted a leave request for your approval.'
+    FROM public.profiles WHERE id = v_emp;
+  ELSE
+    PERFORM public.notify_hr_approvers(v_name || ' submitted a leave request for HR approval.');
+  END IF;
+
+  RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.decide_leave_request(
+  p_id UUID, p_approve BOOLEAN, p_reason TEXT DEFAULT NULL
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE r public.leave_requests; v_uid UUID := auth.uid(); v_name TEXT;
+BEGIN
+  SELECT * INTO r FROM public.leave_requests WHERE id = p_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Request not found.'; END IF;
+  SELECT COALESCE(full_name, email) INTO v_name FROM public.profiles WHERE id = r.employee_id;
+
+  IF r.status = 'pending_manager' THEN
+    IF NOT (public.i_manage(r.employee_id) OR public.my_has_role('it')) THEN
+      RAISE EXCEPTION 'Not authorized to approve at this stage.';
+    END IF;
+    IF p_approve THEN
+      UPDATE public.leave_requests
+        SET status = 'pending_hr', tier1_approver_id = v_uid, tier1_at = NOW() WHERE id = p_id;
+      PERFORM public.notify_hr_approvers(v_name || ' leave request approved by line manager — needs HR sign-off.');
+      INSERT INTO public.notifications (user_id, type, message)
+        VALUES (r.employee_id, 'leave', 'Your leave request was approved by your line manager and sent to HR.');
+    ELSE
+      UPDATE public.leave_requests
+        SET status = 'rejected', tier1_approver_id = v_uid, tier1_at = NOW(),
+            rejection_reason = NULLIF(trim(p_reason), '') WHERE id = p_id;
+      INSERT INTO public.notifications (user_id, type, message)
+        VALUES (r.employee_id, 'leave', 'Your leave request was rejected by your line manager.');
+    END IF;
+
+  ELSIF r.status = 'pending_hr' THEN
+    IF NOT (public.my_has_role('hr_approve_requests') OR public.my_has_role('it')) THEN
+      RAISE EXCEPTION 'Not authorized to approve at this stage.';
+    END IF;
+    IF p_approve THEN
+      UPDATE public.leave_requests
+        SET status = 'approved', hr_approver_id = v_uid, hr_at = NOW() WHERE id = p_id;
+      INSERT INTO public.notifications (user_id, type, message)
+        VALUES (r.employee_id, 'leave', 'Your leave request has been fully approved.');
+    ELSE
+      UPDATE public.leave_requests
+        SET status = 'rejected', hr_approver_id = v_uid, hr_at = NOW(),
+            rejection_reason = NULLIF(trim(p_reason), '') WHERE id = p_id;
+      INSERT INTO public.notifications (user_id, type, message)
+        VALUES (r.employee_id, 'leave', 'Your leave request was rejected by HR.');
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'This request is no longer pending.';
+  END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.withdraw_leave_request(p_id UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE public.leave_requests
+    SET status = 'cancelled'
+    WHERE id = p_id AND employee_id = auth.uid()
+      AND status IN ('pending_manager', 'pending_hr');
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Only your own requests that are still pending can be withdrawn.';
+  END IF;
+END;
+$$;
+
+-- IT-only: revoke a fully approved leave. Balance is restored automatically
+-- (revoked rows are excluded from the usage sum) and the dates unblock.
+CREATE OR REPLACE FUNCTION public.revoke_leave_request(p_id UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE r public.leave_requests;
+BEGIN
+  IF NOT public.my_has_role('it') THEN RAISE EXCEPTION 'Only IT can revoke approved leaves.'; END IF;
+  SELECT * INTO r FROM public.leave_requests WHERE id = p_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Request not found.'; END IF;
+  IF r.status <> 'approved' THEN RAISE EXCEPTION 'Only approved leaves can be revoked.'; END IF;
+  UPDATE public.leave_requests
+    SET status = 'revoked', revoked_by = auth.uid(), revoked_at = NOW() WHERE id = p_id;
+  INSERT INTO public.notifications (user_id, type, message)
+    VALUES (r.employee_id, 'leave', 'A previously approved leave was revoked by IT.');
+END;
+$$;
+
+-- HR sets / updates the allowance for one or many employees at once.
+CREATE OR REPLACE FUNCTION public.set_leave_balance(
+  p_employees UUID[], p_category UUID, p_allowance NUMERIC
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+  INSERT INTO public.leave_balances (employee_id, category_id, allowance)
+  SELECT unnest(p_employees), p_category, p_allowance
+  ON CONFLICT (employee_id, category_id)
+  DO UPDATE SET allowance = EXCLUDED.allowance, updated_at = NOW();
+END;
+$$;
+
+-- HR/IT assigns one or many employees to a calendar.
+CREATE OR REPLACE FUNCTION public.assign_calendar(p_employees UUID[], p_calendar UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+  INSERT INTO public.calendar_assignments (employee_id, calendar_id)
+  SELECT unnest(p_employees), p_calendar
+  ON CONFLICT (employee_id) DO UPDATE SET calendar_id = EXCLUDED.calendar_id;
+END;
+$$;
+
+-- ---------------------------------------------------------------
+-- BALANCE SUMMARY VIEW (security_invoker = respects caller RLS)
+-- ---------------------------------------------------------------
+DROP VIEW IF EXISTS public.leave_balance_summary;
+CREATE VIEW public.leave_balance_summary WITH (security_invoker = true) AS
+SELECT
+  b.employee_id,
+  b.category_id,
+  c.name    AS category_name,
+  c.is_paid,
+  b.allowance,
+  COALESCE((
+    SELECT SUM(lr.days_count) FROM public.leave_requests lr
+    WHERE lr.employee_id = b.employee_id
+      AND lr.category_id = b.category_id
+      AND lr.status = 'approved'
+  ), 0) AS used,
+  b.allowance - COALESCE((
+    SELECT SUM(lr.days_count) FROM public.leave_requests lr
+    WHERE lr.employee_id = b.employee_id
+      AND lr.category_id = b.category_id
+      AND lr.status = 'approved'
+  ), 0) AS remaining
+FROM public.leave_balances b
+JOIN public.leave_categories c ON c.id = b.category_id;
+
+-- ---------------------------------------------------------------
+-- ROW LEVEL SECURITY
+-- ---------------------------------------------------------------
+ALTER TABLE public.leave_categories     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.leave_balances       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.leave_requests       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.holiday_calendars    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.calendar_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.public_holidays      ENABLE ROW LEVEL SECURITY;
+
+-- ---- LEAVE CATEGORIES ---- (everyone reads active list; HR/IT manage)
+DROP POLICY IF EXISTS "leave_cat_read"   ON public.leave_categories;
+DROP POLICY IF EXISTS "leave_cat_manage" ON public.leave_categories;
+CREATE POLICY "leave_cat_read" ON public.leave_categories
+  FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "leave_cat_manage" ON public.leave_categories
+  FOR ALL USING (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
+  WITH CHECK (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'));
+
+-- ---- LEAVE BALANCES ---- (own + privileged read; writes via RPC only)
+DROP POLICY IF EXISTS "leave_bal_read_own"        ON public.leave_balances;
+DROP POLICY IF EXISTS "leave_bal_read_privileged" ON public.leave_balances;
+CREATE POLICY "leave_bal_read_own" ON public.leave_balances
+  FOR SELECT USING (employee_id = auth.uid());
+CREATE POLICY "leave_bal_read_privileged" ON public.leave_balances
+  FOR SELECT USING (
+    public.my_has_role('hr_manage_policies') OR public.my_has_role('hr_view_timesheets')
+    OR public.my_has_role('hr_approve_requests') OR public.my_has_role('it')
+  );
+
+-- ---- LEAVE REQUESTS ---- (reads; all writes go through SECURITY DEFINER RPCs)
+DROP POLICY IF EXISTS "leave_req_read_own"        ON public.leave_requests;
+DROP POLICY IF EXISTS "leave_req_read_manager"    ON public.leave_requests;
+DROP POLICY IF EXISTS "leave_req_read_privileged" ON public.leave_requests;
+CREATE POLICY "leave_req_read_own" ON public.leave_requests
+  FOR SELECT USING (employee_id = auth.uid());
+CREATE POLICY "leave_req_read_manager" ON public.leave_requests
+  FOR SELECT USING (public.i_manage(employee_id));
+CREATE POLICY "leave_req_read_privileged" ON public.leave_requests
+  FOR SELECT USING (
+    public.my_has_role('hr_view_timesheets') OR public.my_has_role('hr_approve_requests')
+    OR public.my_has_role('hr_manage_policies') OR public.my_has_role('it')
+  );
+
+-- ---- CALENDARS / HOLIDAYS ---- (readable by all authenticated; HR/IT manage)
+DROP POLICY IF EXISTS "cal_read"   ON public.holiday_calendars;
+DROP POLICY IF EXISTS "cal_manage" ON public.holiday_calendars;
+CREATE POLICY "cal_read" ON public.holiday_calendars
+  FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "cal_manage" ON public.holiday_calendars
+  FOR ALL USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'))
+  WITH CHECK (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
+
+DROP POLICY IF EXISTS "holidays_read"   ON public.public_holidays;
+DROP POLICY IF EXISTS "holidays_manage" ON public.public_holidays;
+CREATE POLICY "holidays_read" ON public.public_holidays
+  FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "holidays_manage" ON public.public_holidays
+  FOR ALL USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'))
+  WITH CHECK (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
+
+DROP POLICY IF EXISTS "cal_assign_read_own"        ON public.calendar_assignments;
+DROP POLICY IF EXISTS "cal_assign_read_privileged" ON public.calendar_assignments;
+DROP POLICY IF EXISTS "cal_assign_manage"          ON public.calendar_assignments;
+CREATE POLICY "cal_assign_read_own" ON public.calendar_assignments
+  FOR SELECT USING (employee_id = auth.uid());
+CREATE POLICY "cal_assign_read_privileged" ON public.calendar_assignments
+  FOR SELECT USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
+CREATE POLICY "cal_assign_manage" ON public.calendar_assignments
+  FOR ALL USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'))
+  WITH CHECK (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
+
+-- ---------------------------------------------------------------
+-- EXTEND EXISTING-TABLE READ ACCESS FOR THE GRANULAR HR FLAGS
+-- (the legacy 'hr' role already had these; the new flag holders need
+--  the same reads to power the HR Panel)
+-- ---------------------------------------------------------------
+
+-- Helper: holds any HR-panel flag
+CREATE OR REPLACE FUNCTION public.has_any_hr_flag()
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT public.my_has_role('hr_view_timesheets')
+      OR public.my_has_role('hr_manage_policies')
+      OR public.my_has_role('hr_manage_calendar')
+      OR public.my_has_role('hr_approve_requests');
+$$;
+
+-- Profiles: any HR-flag holder can read all profiles (employee pickers, names)
+DROP POLICY IF EXISTS "profiles_read_hr_flags" ON public.profiles;
+CREATE POLICY "profiles_read_hr_flags" ON public.profiles
+  FOR SELECT USING (public.has_any_hr_flag());
+
+-- Timesheets + entries: the timesheet-view flag can read all
+DROP POLICY IF EXISTS "timesheets_read_hr_view" ON public.timesheets;
+CREATE POLICY "timesheets_read_hr_view" ON public.timesheets
+  FOR SELECT USING (public.my_has_role('hr_view_timesheets'));
+
+DROP POLICY IF EXISTS "entries_read_hr_view" ON public.timesheet_entries;
+CREATE POLICY "entries_read_hr_view" ON public.timesheet_entries
+  FOR SELECT USING (public.my_has_role('hr_view_timesheets'));
+
+-- Projects + stages: HR-flag holders can read the catalogue for filters/labels
+DROP POLICY IF EXISTS "projects_read_hr_flags" ON public.projects;
+CREATE POLICY "projects_read_hr_flags" ON public.projects
+  FOR SELECT USING (public.has_any_hr_flag());
+
+DROP POLICY IF EXISTS "stages_read_hr_flags" ON public.project_stages;
+CREATE POLICY "stages_read_hr_flags" ON public.project_stages
+  FOR SELECT USING (public.has_any_hr_flag());

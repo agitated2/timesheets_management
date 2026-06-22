@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { NavLink, Link, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Clock, BarChart2, CheckSquare,
-  Shield, LogOut, Sun, Moon, Menu, X, Settings, Briefcase
+  Shield, LogOut, Sun, Moon, Menu, X, Settings, Briefcase,
+  CalendarDays, HeartHandshake
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -70,6 +71,14 @@ export default function Navbar() {
   }
   if (hasRole('manager') || hasRole('c_suite')) {
     links.push({ to: '/reviews', icon: CheckSquare, label: 'Reviews' })
+  }
+  // Requests panel is available to everyone
+  links.push({ to: '/requests', icon: HeartHandshake, label: 'Requests' })
+  if (
+    hasRole('hr_view_timesheets') || hasRole('hr_manage_policies') ||
+    hasRole('hr_manage_calendar') || hasRole('hr_approve_requests') || hasRole('it')
+  ) {
+    links.push({ to: '/hr', icon: CalendarDays, label: 'HR Panel' })
   }
   if (hasRole('global_analytics') || hasRole('team_analytics')) {
     links.push({ to: '/analytics', icon: BarChart2, label: 'Analytics' })

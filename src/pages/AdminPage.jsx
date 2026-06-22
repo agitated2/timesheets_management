@@ -28,28 +28,39 @@ function Pagination({ page, totalPages, onChange }) {
   )
 }
 
-const ROLES = ['employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control']
+const ROLES = [
+  'employee', 'manager', 'hr', 'c_suite', 'it', 'global_analytics', 'team_analytics', 'projects_control',
+  'hr_view_timesheets', 'hr_manage_policies', 'hr_manage_calendar', 'hr_approve_requests',
+]
 
 const roleDisplay = {
-  employee:         'Employee',
-  manager:          'Manager',
-  hr:               'HR',
-  c_suite:          'C-Suite',
-  it:               'IT Admin',
-  global_analytics: 'Global Analytics',
-  team_analytics:   'Team Analytics',
-  projects_control: 'Projects Control',
+  employee:            'Employee',
+  manager:             'Manager',
+  hr:                  'HR',
+  c_suite:             'C-Suite',
+  it:                  'IT Admin',
+  global_analytics:    'Global Analytics',
+  team_analytics:      'Team Analytics',
+  projects_control:    'Projects Control',
+  hr_view_timesheets:  'HR · View Timesheets',
+  hr_manage_policies:  'HR · Manage Policies',
+  hr_manage_calendar:  'HR · Manage Calendar',
+  hr_approve_requests: 'HR · Approve Requests',
 }
 
 const roleBadge = {
-  employee:         'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
-  manager:          'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-  hr:               'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
-  c_suite:          'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  it:               'bg-ae7-light text-ae7-red dark:bg-ae7-red/10 dark:text-red-300',
-  global_analytics: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
-  team_analytics:   'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
-  projects_control: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
+  employee:            'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
+  manager:             'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  hr:                  'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  c_suite:             'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  it:                  'bg-ae7-light text-ae7-red dark:bg-ae7-red/10 dark:text-red-300',
+  global_analytics:    'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+  team_analytics:      'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
+  projects_control:    'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
+  hr_view_timesheets:  'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  hr_manage_policies:  'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  hr_manage_calendar:  'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+  hr_approve_requests: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
 }
 
 const statusBadge = {

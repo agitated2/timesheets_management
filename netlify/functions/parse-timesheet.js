@@ -63,6 +63,7 @@ exports.handler = async (event) => {
         entries: d.entries,
       }))
       const projectViolations = await checkProjectViolations(supabaseAdmin, user.id, days)
+      const leaveViolations   = await checkLeaveViolations(supabaseAdmin, user.id, days)
       return {
         statusCode: 200,
         headers,
@@ -75,6 +76,8 @@ exports.handler = async (event) => {
           hasDiscrepancies: discrepancies.length > 0,
           projectViolations,
           hasProjectViolations: projectViolations.length > 0,
+          leaveViolations,
+          hasLeaveViolations: leaveViolations.length > 0,
         }),
       }
     }
@@ -103,6 +106,22 @@ exports.handler = async (event) => {
         }),
       }
     }
+
+    // ── Block actual upload if it overlaps approved leave ───────
+    const leaveViolations = await checkLeaveViolations(supabaseAdmin, user.id, days)
+    if (leaveViolations.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: 'You have an approved leave for this date range. Please adjust your timesheet entries.',
+          leaveViolations,
+        }),
+      }
+    }
+
+    // ── Resolve canonical project_id / stage_id for each entry ──
+    await attachProjectStageIds(supabaseAdmin, days)
 
     // ── Upload raw file to storage (once, shared across all days) ─
     const safeFileName = (fileName || 'timesheet.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -238,6 +257,89 @@ async function checkProjectViolations(db, userId, days) {
   }
 
   return [...violationMap.values()]
+}
+
+// ---------------------------------------------------------------
+// LEAVE VALIDATION
+// Flags timesheet dates/entries that overlap an approved leave.
+// Daily leave blocks the whole working day; hourly leave blocks
+// only overlapping entry time windows. Weekends / public holidays
+// are never blocked (working-day check via is_working_day RPC).
+// ---------------------------------------------------------------
+
+async function checkLeaveViolations(db, userId, days) {
+  if (days.length === 0) return []
+  const dates = days.map(d => d.date).sort()
+  const min = dates[0], max = dates[dates.length - 1]
+
+  const { data: leaves } = await db
+    .from('leave_requests')
+    .select('unit, start_date, end_date, start_time, end_time')
+    .eq('employee_id', userId)
+    .eq('status', 'approved')
+    .lte('start_date', max)
+    .gte('end_date', min)
+
+  if (!leaves || leaves.length === 0) return []
+
+  const dailyLeaves  = leaves.filter(l => l.unit === 'daily')
+  const hourlyLeaves = leaves.filter(l => l.unit === 'hourly')
+  const violations = []
+
+  for (const day of days) {
+    // Daily leave → whole working day blocked
+    const covering = dailyLeaves.find(l => day.date >= l.start_date && day.date <= l.end_date)
+    if (covering) {
+      const { data: working } = await db.rpc('is_working_day', { emp: userId, d: day.date })
+      if (working) { violations.push({ type: 'leave_day', date: day.date }); continue }
+    }
+    // Hourly leave → overlapping entry windows blocked
+    for (const lv of hourlyLeaves.filter(l => l.start_date === day.date)) {
+      const lvFrom = (lv.start_time || '').slice(0, 5)
+      const lvTo   = (lv.end_time   || '').slice(0, 5)
+      for (const e of day.entries) {
+        if (!e.time_from || !e.time_to) continue
+        if (lvFrom < e.time_to && lvTo > e.time_from) {
+          violations.push({ type: 'leave_hours', date: day.date, timeRange: `${lvFrom}–${lvTo}` })
+          break
+        }
+      }
+    }
+  }
+  return violations
+}
+
+// ---------------------------------------------------------------
+// Resolve canonical project_id / stage_id for each parsed entry so
+// the HR review page can filter reliably. Names are matched against
+// active projects and their non-archived stages (case-insensitive).
+// ---------------------------------------------------------------
+
+async function attachProjectStageIds(db, days) {
+  const { data: projects } = await db
+    .from('projects')
+    .select('id, name, project_stages(id, name, is_archived)')
+    .eq('status', 'active')
+
+  const pmap = new Map()
+  for (const p of (projects || [])) pmap.set(p.name.toLowerCase(), p)
+
+  for (const day of days) {
+    for (const e of day.entries) {
+      e.project_id = null
+      e.stage_id   = null
+      if (!e.project_name) continue
+      const p = pmap.get(e.project_name.toLowerCase())
+      if (!p) continue
+      e.project_id = p.id
+      if (e.stage_name) {
+        const stage = (p.project_stages || [])
+          .filter(s => !s.is_archived)
+          .find(s => s.name.toLowerCase() === e.stage_name.toLowerCase())
+        if (stage) e.stage_id = stage.id
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------
