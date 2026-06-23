@@ -9,6 +9,7 @@ export default function OnboardingPage() {
   const navigate = useNavigate()
 
   const [fullName, setFullName]           = useState(profile?.full_name || '')
+  const [discipline, setDiscipline]       = useState(profile?.discipline || '')
   const [managers, setManagers]           = useState([])
   const [managerSearch, setManagerSearch] = useState('')
   const [selectedManager, setSelectedManager] = useState(null)
@@ -37,6 +38,7 @@ export default function OnboardingPage() {
 
     const updates = {
       full_name: fullName.trim(),
+      discipline: discipline.trim() || null,
       onboarding_complete: true,
       ...(selectedManager && { manager_id: selectedManager.id, manager_ids: [selectedManager.id] }),
     }
@@ -78,6 +80,18 @@ export default function OnboardingPage() {
                 placeholder="Jane Smith"
                 required
                 autoFocus
+              />
+            </div>
+
+            <div>
+              <label className="label" htmlFor="discipline">Discipline / job title <span className="text-gray-400 font-normal">(optional)</span></label>
+              <input
+                id="discipline"
+                type="text"
+                value={discipline}
+                onChange={e => setDiscipline(e.target.value)}
+                className="input"
+                placeholder="e.g. Structural Engineer, MEP Designer"
               />
             </div>
 

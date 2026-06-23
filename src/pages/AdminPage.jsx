@@ -182,6 +182,7 @@ function EditUserModal({ user: target, onClose, onSaved }) {
   const targetManagerIds = target.manager_ids || []
   const [email, setEmail]           = useState(target.email || '')
   const [fullName, setFullName]     = useState(target.full_name || '')
+  const [discipline, setDiscipline] = useState(target.discipline || '')
   const [roles, setRoles]           = useState(targetRoles)
   const [managerIds, setManagerIds] = useState(targetManagerIds)
   const [newPassword, setNewPw]     = useState('')
@@ -214,17 +215,19 @@ function EditUserModal({ user: target, onClose, onSaved }) {
     setError('')
     setLoading(true)
 
-    const emailChanged    = email.trim().toLowerCase() !== target.email
-    const nameChanged     = fullName.trim() !== (target.full_name || '')
-    const rolesChanged    = JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort())
-    const managersChanged = JSON.stringify([...managerIds].sort()) !== JSON.stringify([...targetManagerIds].sort())
+    const emailChanged       = email.trim().toLowerCase() !== target.email
+    const nameChanged        = fullName.trim() !== (target.full_name || '')
+    const disciplineChanged  = discipline.trim() !== (target.discipline || '')
+    const rolesChanged       = JSON.stringify([...roles].sort()) !== JSON.stringify([...targetRoles].sort())
+    const managersChanged    = JSON.stringify([...managerIds].sort()) !== JSON.stringify([...targetManagerIds].sort())
 
-    // Profile-level fields (name, roles, managers) — IT can write these directly
-    // via RLS (profiles_update_it). No serverless function required.
+    // Profile-level fields (name, discipline, roles, managers) — IT can write
+    // these directly via RLS (profiles_update_it). No serverless function required.
     const patch = {}
-    if (nameChanged)     patch.full_name   = fullName.trim() || null
-    if (rolesChanged)    patch.roles       = roles
-    if (managersChanged) patch.manager_ids = managerIds
+    if (nameChanged)       patch.full_name   = fullName.trim() || null
+    if (disciplineChanged) patch.discipline  = discipline.trim() || null
+    if (rolesChanged)      patch.roles       = roles
+    if (managersChanged)   patch.manager_ids = managerIds
 
     if (Object.keys(patch).length > 0) {
       const { error: upErr } = await supabase.from('profiles').update(patch).eq('id', target.id)
@@ -257,6 +260,7 @@ function EditUserModal({ user: target, onClose, onSaved }) {
       ...target,
       email: emailChanged ? email.trim().toLowerCase() : target.email,
       full_name: nameChanged ? (fullName.trim() || null) : target.full_name,
+      discipline: disciplineChanged ? (discipline.trim() || null) : target.discipline,
       roles: rolesChanged ? roles : target.roles,
       manager_ids: managersChanged ? managerIds : target.manager_ids,
     })
@@ -272,6 +276,10 @@ function EditUserModal({ user: target, onClose, onSaved }) {
 
         <Field label="Full name">
           <input type="text" value={fullName} onChange={e => setFullName(e.target.value)} className="input" placeholder="Jane Smith" />
+        </Field>
+
+        <Field label="Discipline / job title">
+          <input type="text" value={discipline} onChange={e => setDiscipline(e.target.value)} className="input" placeholder="e.g. Structural Engineer, MEP Designer" />
         </Field>
 
         <Field label="Roles">

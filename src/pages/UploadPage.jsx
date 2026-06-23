@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
+import { canLogToStage, isOverBudget, isStageSelectable } from '../lib/projectRules'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 
@@ -148,8 +149,12 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
         return { title: `Not assigned to "${v.project}"`, body: 'You are not a member of this project. Contact your line manager to be added.' }
       case 'stage_not_found':
         return { title: `Stage "${v.stage}" not found in "${v.project}"`, body: 'This stage does not exist for the project. Contact your line manager.' }
+      case 'stage_required':
+        return { title: `Select a stage for "${v.project}"`, body: 'Logging hours directly to a project isn’t allowed — every entry needs a stage.' }
       case 'stage_expired':
-        return { title: `Stage "${v.stage}" is not active`, body: `The running time for this stage has elapsed. Contact your line manager to extend it.` }
+        return { title: `Stage "${v.stage}" is outside its window`, body: `The work date falls outside this stage's active dates. Contact your line manager to adjust it.` }
+      case 'stage_locked':
+        return { title: `Stage "${v.stage}" is locked`, body: 'This stage is closed and its 5-day grace period has passed. Contact your line manager.' }
       default:
         return { title: 'Project issue', body: 'Contact your line manager.' }
     }
@@ -356,13 +361,13 @@ function InAppEntry({ profile, onBack, onSuccess }) {
         .eq('employee_id', profile.id)
       const ids = (members || []).map(m => m.project_id)
       if (ids.length === 0) { setLoading(false); return }
-      const { data: projs } = await supabase
-        .from('projects')
-        .select('id, name, project_stages(id, name, start_date, end_date, order_index, is_archived)')
-        .in('id', ids)
-        .eq('status', 'active')
-        .order('name')
-      setProjects(projs || [])
+      const [{ data: projs }, { data: stages }] = await Promise.all([
+        supabase.from('projects').select('id, name, tracking_type, total_hours').in('id', ids).eq('status', 'active').order('name'),
+        supabase.from('project_stages_view').select('*').in('project_id', ids),
+      ])
+      const byProject = {}
+      ;(stages || []).forEach(s => { (byProject[s.project_id] ||= []).push(s) })
+      setProjects((projs || []).map(p => ({ ...p, project_stages: byProject[p.id] || [] })))
       setLoading(false)
     }
     load()
@@ -392,17 +397,40 @@ function InAppEntry({ profile, onBack, onSuccess }) {
     ))
   }
 
+  function ruleStage(stage, proj) {
+    return {
+      trackingType:   proj?.tracking_type,
+      allocatedHours: Number(stage.allocated_hours || 0),
+      loggedHours:    Number(stage.logged_hours || 0),
+      endDate:        stage.end_date,
+      softClosedAt:   stage.soft_closed_at,
+    }
+  }
+
+  // Blocking issue (locked / outside window). Over-budget is non-blocking.
   function getStageWarning(entry, date) {
     if (!entry.projectId || !entry.stageId || !date) return null
     const proj  = projects.find(p => p.id === entry.projectId)
     const stage = proj?.project_stages?.find(s => s.id === entry.stageId)
     if (!stage) return null
-    const { start_date: s, end_date: e } = stage
-    if (!s && !e) return null
-    if (e && date > e)
-      return `Stage "${stage.name}" ended on ${e}. Contact your line manager.`
-    if (s && date < s)
-      return `Stage "${stage.name}" hasn't started yet (starts ${s}).`
+    const verdict = canLogToStage(ruleStage(stage, proj), date)
+    if (verdict.ok) return null
+    if (verdict.reason === 'locked')
+      return `Stage "${stage.name}" is closed and past its 5-day grace period.`
+    if (verdict.reason === 'future_on_closed')
+      return `Stage "${stage.name}" closed on ${stage.end_date}. You can only log work on or before that date.`
+    return `Stage "${stage.name}" can't be logged for this date.`
+  }
+
+  // Non-blocking note for hour-pool overruns.
+  function getStageOverrun(entry, date) {
+    if (!entry.projectId || !entry.stageId) return null
+    const proj  = projects.find(p => p.id === entry.projectId)
+    const stage = proj?.project_stages?.find(s => s.id === entry.stageId)
+    if (!stage) return null
+    const hrs = calcHours(entry.timeFrom, entry.timeTo) || 0
+    if (isOverBudget(ruleStage(stage, proj), hrs))
+      return `This will exceed the hour pool for "${stage.name}" — it's allowed but flagged for your manager.`
     return null
   }
 
@@ -539,6 +567,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
                 onUpdateEntry={(entryId, field, value) => updateEntry(de.id, entryId, field, value)}
                 onRemove={() => removeDate(de.id)}
                 getStageWarning={getStageWarning}
+                getOverrun={getStageOverrun}
                 canRemove={dateEntries.length > 1}
               />
             ))}
@@ -578,7 +607,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
   )
 }
 
-function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove }) {
+function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, getOverrun, canRemove }) {
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30">
@@ -611,6 +640,7 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
             onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
             onRemove={() => onRemoveEntry(e.id)}
             getStageWarning={getStageWarning}
+            getOverrun={getOverrun}
           />
         ))}
       </div>
@@ -624,13 +654,23 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
   )
 }
 
-function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }) {
+function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning, getOverrun }) {
   const selectedProject = projects.find(p => p.id === entry.projectId)
   const stages = selectedProject
-    ? [...(selectedProject.project_stages || [])].filter(s => !s.is_archived).sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
+    ? [...(selectedProject.project_stages || [])]
+        .filter(s => !s.is_archived)
+        .filter(s => isStageSelectable({
+          trackingType:   selectedProject.tracking_type,
+          allocatedHours: Number(s.allocated_hours || 0),
+          loggedHours:    Number(s.logged_hours || 0),
+          endDate:        s.end_date,
+          softClosedAt:   s.soft_closed_at,
+        }, date))
+        .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
     : []
-  const hours  = calcHours(entry.timeFrom, entry.timeTo)
+  const hours   = calcHours(entry.timeFrom, entry.timeTo)
   const warning = getStageWarning(entry, date)
+  const overrun = getOverrun ? getOverrun(entry, date) : null
 
   return (
     <div className="px-5 py-4 space-y-3">
@@ -663,11 +703,18 @@ function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }
         </div>
       </div>
 
-      {/* Stage warning */}
+      {/* Stage warning (blocking) */}
       {warning && (
         <div className="flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
           <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
           {warning}
+        </div>
+      )}
+      {/* Over-budget note (non-blocking) */}
+      {!warning && overrun && (
+        <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 rounded-lg px-3 py-2">
+          <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
+          {overrun}
         </div>
       )}
 

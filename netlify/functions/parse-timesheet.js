@@ -192,14 +192,44 @@ async function checkProjectViolations(db, userId, days) {
   }
   if (pairs.length === 0) return []
 
-  // Load all managed projects (active only) with stages + members
+  // Load all managed projects (active only) with stages + members + constraints
   const { data: projects } = await db
     .from('projects')
-    .select('id, name, project_stages(id, name, start_date, end_date, is_archived), project_members(employee_id)')
+    .select('id, name, tracking_type, total_hours, project_stages(id, name, start_date, end_date, is_archived, allocated_hours, soft_closed_at), project_members(employee_id)')
     .eq('status', 'active')
 
   const projectMap = new Map()
   for (const p of (projects || [])) projectMap.set(p.name.toLowerCase(), p)
+
+  // Cumulative logged hours per stage (approved + pending), for hour-pool state
+  const loggedByStage = new Map()
+  const { data: loggedRows } = await db
+    .from('timesheet_entries')
+    .select('stage_id, hours_decimal, timesheets!inner(status)')
+    .not('stage_id', 'is', null)
+    .in('timesheets.status', ['pending', 'approved'])
+  for (const r of (loggedRows || [])) {
+    loggedByStage.set(r.stage_id, (loggedByStage.get(r.stage_id) || 0) + (Number(r.hours_decimal) || 0))
+  }
+
+  const today = new Date().toISOString().slice(0, 10)
+  const addDaysISO = (iso, n) => {
+    const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n)
+    return d.toISOString().slice(0, 10)
+  }
+  // Mirror of schema.sql / projectRules: effective stage lifecycle state.
+  function stageState(stage, proj) {
+    const logged = loggedByStage.get(stage.id) || 0
+    if (proj.tracking_type === 'hours' && stage.allocated_hours > 0 && logged >= stage.allocated_hours) {
+      if (stage.soft_closed_at && today > addDaysISO(String(stage.soft_closed_at).slice(0, 10), 5)) return 'hard_locked'
+      return 'soft_closed'
+    }
+    if (proj.tracking_type === 'date' && stage.end_date && today > stage.end_date) {
+      if (today > addDaysISO(stage.end_date, 5)) return 'hard_locked'
+      return 'soft_closed'
+    }
+    return 'active'
+  }
 
   // violationMap groups identical issues, collecting row numbers
   // Key: 'type::project::stage::date'
@@ -232,8 +262,11 @@ async function checkProjectViolations(db, userId, days) {
       continue
     }
 
-    // Stage check — only if the entry mentions a stage
-    if (!stage_name) continue
+    // Every entry needs a stage — hours can't be logged directly to a project
+    if (!stage_name) {
+      addViolation('stage_required', project_name, null, date, row_number)
+      continue
+    }
 
     const stages  = (p.project_stages || []).filter(s => !s.is_archived)
     const matched = stages.find(s => s.name.toLowerCase() === stage_name.toLowerCase())
@@ -243,16 +276,25 @@ async function checkProjectViolations(db, userId, days) {
       continue
     }
 
-    // Date coverage check for the specific stage
-    const { start_date: s, end_date: e } = matched
-    let covered = true
-    if (!s && !e) covered = true
-    else if (!s)  covered = date <= e
-    else if (!e)  covered = date >= s
-    else          covered = date >= s && date <= e
-
-    if (!covered) {
-      addViolation('stage_expired', project_name, stage_name, date, row_number)
+    // Lifecycle: hard-locked rejects; soft-closed accepts historical work
+    // within the 5-day grace; active is checked against its own window.
+    const state = stageState(matched, p)
+    if (state === 'hard_locked') {
+      addViolation('stage_locked', project_name, stage_name, date, row_number)
+      continue
+    }
+    if (state === 'soft_closed') {
+      if (p.tracking_type === 'date' && matched.end_date && date > matched.end_date) {
+        addViolation('stage_expired', project_name, stage_name, date, row_number)
+      }
+      continue   // hour-pool overrun within grace is allowed (flagged in DB)
+    }
+    // Active date stage: entry must fall on/after the stage start
+    if (p.tracking_type === 'date') {
+      const { start_date: s, end_date: e } = matched
+      if ((s && date < s) || (e && date > e)) {
+        addViolation('stage_expired', project_name, stage_name, date, row_number)
+      }
     }
   }
 

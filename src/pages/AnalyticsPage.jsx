@@ -3,11 +3,12 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, Tooltip,
-  XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend
+  XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend, ReferenceLine
 } from 'recharts'
-import { format, subDays, eachDayOfInterval, isWeekend, parseISO } from 'date-fns'
+import { format, subDays, addDays, eachDayOfInterval, isWeekend, parseISO } from 'date-fns'
 import { Download, Filter, BarChart2, TrendingUp, ChevronDown, Check } from 'lucide-react'
 import clsx from 'clsx'
+import Tabs from '../components/Tabs'
 
 const COLORS = ['#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899','#14B8A6','#F97316','#6366F1','#84CC16']
 
@@ -116,9 +117,168 @@ function MultiSelectDropdown({ options, value, onChange, placeholder }) {
   )
 }
 
+// ── Project Insights (per-project constraint analytics) ───────────
+function ProjectInsights({ dark }) {
+  const [projects, setProjects]   = useState([])
+  const [projectId, setProjectId] = useState('')
+  const [stages, setStages]       = useState([])
+  const [entries, setEntries]     = useState([])
+  const [loading, setLoading]     = useState(false)
+
+  useEffect(() => {
+    supabase.from('projects').select('id, name, tracking_type, total_hours').order('name')
+      .then(({ data }) => { setProjects(data || []); setProjectId(prev => prev || data?.[0]?.id || '') })
+  }, [])
+
+  useEffect(() => {
+    if (!projectId) return
+    setLoading(true)
+    Promise.all([
+      supabase.from('project_stages_view').select('*').eq('project_id', projectId).order('order_index'),
+      supabase.from('timesheet_entries')
+        .select('hours_decimal, timesheets!inner(date, status, profiles!employee_id(discipline))')
+        .eq('project_id', projectId)
+        .in('timesheets.status', ['approved', 'pending']),
+    ]).then(([s, e]) => { setStages(s.data || []); setEntries(e.data || []); setLoading(false) })
+  }, [projectId])
+
+  const project = projects.find(p => p.id === projectId)
+  const isHours = project?.tracking_type === 'hours'
+
+  // 1. Estimated vs actual per stage
+  const estActual = useMemo(() => stages.filter(s => !s.is_archived).map(s => {
+    const logged = Number(s.logged_hours || 0)
+    const alloc  = Number(s.allocated_hours || 0)
+    return {
+      name: s.name,
+      budget: alloc,
+      used: alloc ? Math.min(logged, alloc) : logged,
+      over: alloc ? Math.max(0, logged - alloc) : 0,
+    }
+  }), [stages])
+
+  // 2. Workforce by discipline
+  const byDiscipline = useMemo(() => {
+    const acc = {}
+    entries.forEach(e => {
+      const d = e.timesheets?.profiles?.discipline || 'Unspecified'
+      acc[d] = (acc[d] || 0) + (Number(e.hours_decimal) || 0)
+    })
+    return Object.entries(acc).map(([name, hours]) => ({ name, hours: Math.round(hours * 100) / 100 })).sort((a, b) => b.hours - a.hours)
+  }, [entries])
+
+  // 3. Burn-down + 14-day forecast
+  const { burn, cap, forecast, totalLogged } = useMemo(() => {
+    const byDate = {}
+    entries.forEach(e => { const d = e.timesheets?.date; if (d) byDate[d] = (byDate[d] || 0) + (Number(e.hours_decimal) || 0) })
+    const dates = Object.keys(byDate).sort()
+    let cum = 0
+    const series = dates.map(d => { cum += byDate[d]; return { date: format(parseISO(d), 'MMM d'), cumulative: Math.round(cum * 100) / 100 } })
+    const capVal = isHours ? Number(project?.total_hours || 0) : null
+    const since = format(subDays(new Date(), 14), 'yyyy-MM-dd')
+    const last14 = entries.filter(e => (e.timesheets?.date || '') >= since).reduce((s, e) => s + (Number(e.hours_decimal) || 0), 0)
+    const rate = last14 / 14
+    let fc = null
+    if (isHours && capVal && rate > 0 && cum < capVal) {
+      fc = format(addDays(new Date(), Math.ceil((capVal - cum) / rate)), 'MMM d, yyyy')
+    }
+    return { burn: series, cap: capVal, forecast: fc, totalLogged: Math.round(cum * 100) / 100 }
+  }, [entries, isHours, project])
+
+  const tip = { contentStyle: { background: dark ? '#1F2937' : '#FFF', border: 'none', borderRadius: 12, fontSize: 12 } }
+
+  return (
+    <div className="space-y-5">
+      <div className="card p-4 flex items-center gap-3 flex-wrap">
+        <label className="text-sm font-medium">Project</label>
+        <select value={projectId} onChange={e => setProjectId(e.target.value)} className="input text-sm max-w-xs">
+          {projects.length === 0 && <option value="">No projects</option>}
+          {projects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.tracking_type === 'hours' ? 'hours' : 'dates'})</option>)}
+        </select>
+        {isHours && (
+          <span className="text-xs text-gray-500 ml-auto">
+            {totalLogged}h logged of {Number(project?.total_hours || 0)}h pool
+            {forecast && <> · <span className="text-amber-600 dark:text-amber-400">pool empties ~{forecast}</span></>}
+          </span>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="text-center py-16 text-gray-400 text-sm">Loading project data…</div>
+      ) : !project ? (
+        <div className="card p-12 text-center text-gray-500">No project selected.</div>
+      ) : (
+        <>
+          {/* 1. Estimated vs actual */}
+          <div className="card p-5">
+            <h2 className="font-semibold text-sm mb-4 flex items-center gap-2">
+              <BarChart2 size={16} className="text-blue-500" /> Estimated vs actual hours by stage
+            </h2>
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={estActual} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: axisColor(dark) }} />
+                <YAxis tick={{ fontSize: 11, fill: axisColor(dark) }} />
+                <Tooltip {...tip} formatter={(v, n) => [v + 'h', n]} />
+                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                {isHours && <Bar dataKey="budget" name="Budget" fill="#9CA3AF" radius={[4, 4, 0, 0]} />}
+                <Bar dataKey="used" name="Actual" stackId="a" fill="#3B82F6" radius={isHours ? [0, 0, 0, 0] : [4, 4, 0, 0]} />
+                <Bar dataKey="over" name="Over budget" stackId="a" fill="#EF4444" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            {/* 2. Workforce by discipline */}
+            <div className="card p-5">
+              <h2 className="font-semibold text-sm mb-4">Workforce by discipline</h2>
+              {byDiscipline.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-16">No logged hours yet.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <PieChart>
+                    <Pie data={byDiscipline} dataKey="hours" nameKey="name" cx="50%" cy="50%" outerRadius={85} innerRadius={48} paddingAngle={3}>
+                      {byDiscipline.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                    </Pie>
+                    <Tooltip {...tip} formatter={(v) => [v + 'h', 'Hours']} />
+                    <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} formatter={v => v.length > 18 ? v.slice(0, 18) + '…' : v} />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* 3. Burn-down */}
+            <div className="card p-5">
+              <h2 className="font-semibold text-sm mb-4 flex items-center gap-2">
+                <TrendingUp size={16} className="text-blue-500" /> Hour burn-down
+              </h2>
+              {burn.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-16">No logged hours yet.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={burn} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} />
+                    <XAxis dataKey="date" tick={{ fontSize: 11, fill: axisColor(dark) }} interval={Math.max(0, Math.floor(burn.length / 7))} />
+                    <YAxis tick={{ fontSize: 11, fill: axisColor(dark) }} domain={[0, cap ? Math.max(cap, ...burn.map(b => b.cumulative)) : 'auto']} />
+                    <Tooltip {...tip} formatter={(v) => [v + 'h', 'Cumulative']} />
+                    {cap ? <ReferenceLine y={cap} stroke="#EF4444" strokeDasharray="4 4" label={{ value: `Pool ${cap}h`, fontSize: 10, fill: '#EF4444', position: 'insideTopRight' }} /> : null}
+                    <Line type="monotone" dataKey="cumulative" stroke="#3B82F6" strokeWidth={2.5} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+              {forecast && <p className="text-xs text-gray-400 mt-2">Forecast (14-day rate): hour pool exhausts around <strong className="text-amber-600 dark:text-amber-400">{forecast}</strong>.</p>}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function AnalyticsPage() {
   const { profile, hasRole } = useAuth()
   const dark = useIsDark()
+  const [tab, setTab] = useState('overview')
   const isGlobal = hasRole('global_analytics')
   const isTeamAnalytics = hasRole('team_analytics') && !isGlobal
 
@@ -279,6 +439,11 @@ export default function AnalyticsPage() {
         </button>
       </div>
 
+      <Tabs tabs={[{ key: 'overview', label: 'Overview' }, { key: 'projects', label: 'Projects' }]} active={tab} onChange={setTab} />
+
+      {tab === 'projects' && <ProjectInsights dark={dark} />}
+
+      {tab === 'overview' && (<>
       {/* Filters */}
       <div className="card p-4">
         <div className="flex items-center gap-2 mb-3">
@@ -463,6 +628,7 @@ export default function AnalyticsPage() {
           )}
         </>
       )}
+      </>)}
     </div>
   )
 }

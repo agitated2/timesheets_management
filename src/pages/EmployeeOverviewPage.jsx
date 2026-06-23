@@ -5,6 +5,7 @@ import {
   Users, Search, ChevronDown, ChevronRight, Briefcase, CalendarDays, Check,
 } from 'lucide-react'
 import Pagination from '../components/Pagination'
+import EmployeeCalendarModal from '../components/EmployeeCalendarModal'
 import clsx from 'clsx'
 
 const PAGE_SIZE = 10
@@ -40,7 +41,7 @@ function AllowanceEditor({ employeeId, category, current, onSaved }) {
   )
 }
 
-function EmployeeRow({ emp, projects, balances, calendarName, categories, canManage, onChanged }) {
+function EmployeeRow({ emp, projects, balances, calendarName, categories, canManage, onChanged, onOpenCalendar }) {
   const [open, setOpen] = useState(false)
   const balByCat = new Map(balances.map(b => [b.category_id, b]))
 
@@ -58,6 +59,11 @@ function EmployeeRow({ emp, projects, balances, calendarName, categories, canMan
 
       {open && (
         <div className="bg-gray-50 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800 px-5 py-4 grid md:grid-cols-3 gap-5">
+          <div className="md:col-span-3">
+            <button onClick={() => onOpenCalendar(emp)} className="btn-secondary text-sm">
+              <CalendarDays size={14} /> Monthly calendar
+            </button>
+          </div>
           {/* Projects */}
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Projects</p>
@@ -115,6 +121,7 @@ export default function EmployeeOverviewPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const [calendarFor, setCalendarFor] = useState(null)
 
   const load = useCallback(async () => {
     const [profs, members, bals, assigns, cals, cats] = await Promise.all([
@@ -203,12 +210,17 @@ export default function EmployeeOverviewPage() {
                 categories={categories}
                 canManage={canManage}
                 onChanged={load}
+                onOpenCalendar={setCalendarFor}
               />
             ))}
           </div>
         )}
         <Pagination page={current} totalPages={totalPages} onChange={setPage} total={filtered.length} />
       </div>
+
+      {calendarFor && (
+        <EmployeeCalendarModal employee={calendarFor} onClose={() => setCalendarFor(null)} />
+      )}
     </div>
   )
 }

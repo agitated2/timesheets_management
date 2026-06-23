@@ -106,46 +106,47 @@ function ErrorBox({ msg }) {
 
 // ── Create Project Modal ─────────────────────────────────────────
 function CreateProjectModal({ onClose, onCreated }) {
-  const { profile } = useAuth()
   const [name, setName]         = useState('')
   const [desc, setDesc]         = useState('')
+  const [trackingType, setType] = useState('date')   // 'date' | 'hours'
+  const [projStart, setProjStart] = useState('')
+  const [projEnd, setProjEnd]     = useState('')
+  const [totalHours, setTotalHours] = useState('')
   const [stageName, setStageName] = useState('Phase 1')
-  const [startDate, setStart]   = useState('')
-  const [endDate, setEnd]       = useState('')
+  const [stageStart, setStageStart] = useState('')
+  const [stageEnd, setStageEnd]     = useState('')
+  const [stageHours, setStageHours] = useState('')
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState('')
 
+  const isHours = trackingType === 'hours'
+
   async function handleCreate(e) {
     e.preventDefault()
+    setError('')
     if (!name.trim()) { setError('Project name is required.'); return }
+    if (!isHours && !projStart) { setError('A project start date is required.'); return }
+    if (isHours && (!totalHours || Number(totalHours) <= 0)) { setError('A positive total hour pool is required.'); return }
     setLoading(true)
 
-    const { data: proj, error: projErr } = await supabase
-      .from('projects')
-      .insert({ name: name.trim(), description: desc.trim() || null, created_by: profile.id })
-      .select()
-      .single()
-    if (projErr) { setError(projErr.message); setLoading(false); return }
-
-    const { data: stage, error: stageErr } = await supabase
-      .from('project_stages')
-      .insert({
-        project_id: proj.id,
-        name: stageName.trim() || 'Phase 1',
-        start_date: startDate || null,
-        end_date: endDate || null,
-        order_index: 0,
-        created_by: profile.id,
-      })
-      .select()
-      .single()
-    if (stageErr) { setError(stageErr.message); setLoading(false); return }
-
-    await supabase.from('project_stage_logs').insert({
-      stage_id: stage.id, project_id: proj.id, changed_by: profile.id,
-      change_type: 'create',
-      new_start: startDate || null, new_end: endDate || null,
+    const { data: projId, error: pErr } = await supabase.rpc('create_project', {
+      p_name: name.trim(), p_description: desc, p_tracking_type: trackingType,
+      p_start: !isHours ? projStart : null,
+      p_end:   !isHours ? (projEnd || null) : null,
+      p_total_hours: isHours ? Number(totalHours) : null,
     })
+    if (pErr) { setError(pErr.message); setLoading(false); return }
+
+    if (stageName.trim()) {
+      const { error: sErr } = await supabase.rpc('create_stage', {
+        p_project: projId, p_name: stageName.trim(),
+        p_start: !isHours ? (stageStart || projStart) : null,
+        p_end:   !isHours ? (stageEnd || projEnd || null) : null,
+        p_allocated: isHours ? Number(stageHours || totalHours) : null,
+        p_order: 0,
+      })
+      if (sErr) { setError(`Project created, but the first stage failed: ${sErr.message}`); setLoading(false); onCreated(); return }
+    }
 
     setLoading(false)
     onCreated()
@@ -161,19 +162,53 @@ function CreateProjectModal({ onClose, onCreated }) {
         <Field label="Description">
           <textarea value={desc} onChange={e => setDesc(e.target.value)} className="input min-h-[70px] resize-none" placeholder="Optional project description" />
         </Field>
+
+        <Field label="Tracking type *" hint="Locked once the project is created.">
+          <div className="flex gap-2">
+            {[['date', 'By dates', Calendar], ['hours', 'By hours', ScrollText]].map(([v, lbl, Icon]) => (
+              <button type="button" key={v} onClick={() => setType(v)}
+                className={clsx('flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium border transition-colors',
+                  trackingType === v ? 'bg-ae7-red text-white border-ae7-red'
+                    : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800')}>
+                <Icon size={14} /> {lbl}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        {!isHours ? (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Project start *"><input type="date" value={projStart} onChange={e => setProjStart(e.target.value)} className="input text-sm" required /></Field>
+            <Field label="Project end"><input type="date" value={projEnd} min={projStart || undefined} onChange={e => setProjEnd(e.target.value)} className="input text-sm" /></Field>
+          </div>
+        ) : (
+          <Field label="Total hour pool *" hint="Total hours allocated to the entire contract.">
+            <input type="number" min="0" step="0.5" value={totalHours} onChange={e => setTotalHours(e.target.value)} className="input text-sm" placeholder="e.g. 2000" required />
+          </Field>
+        )}
+
         <div className="border-t border-gray-100 dark:border-gray-800 pt-4">
           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">First stage</p>
           <div className="space-y-3">
             <Field label="Stage name">
               <input type="text" value={stageName} onChange={e => setStageName(e.target.value)} className="input" placeholder="Phase 1" />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Start date"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" /></Field>
-              <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
-            </div>
-            <p className="text-xs text-gray-400">Dates are optional — you can define or extend them later.</p>
+            {!isHours ? (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Start date"><input type="date" value={stageStart} onChange={e => setStageStart(e.target.value)} className="input text-sm" /></Field>
+                  <Field label="End date"><input type="date" value={stageEnd} min={stageStart || undefined} onChange={e => setStageEnd(e.target.value)} className="input text-sm" /></Field>
+                </div>
+                <p className="text-xs text-gray-400">Defaults to the project dates. End dates can be set later.</p>
+              </>
+            ) : (
+              <Field label="Stage hours" hint="Carved out of the project pool. Defaults to the full pool.">
+                <input type="number" min="0" step="0.5" value={stageHours} onChange={e => setStageHours(e.target.value)} className="input text-sm" placeholder={totalHours || 'e.g. 500'} />
+              </Field>
+            )}
           </div>
         </div>
+
         <ErrorBox msg={error} />
         <div className="flex gap-3 pt-1">
           <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
@@ -188,34 +223,34 @@ function CreateProjectModal({ onClose, onCreated }) {
 
 // ── Add Stage Modal ──────────────────────────────────────────────
 function AddStageModal({ project, onClose, onCreated }) {
-  const { profile } = useAuth()
   const [name, setName]       = useState('')
   const [startDate, setStart] = useState('')
   const [endDate, setEnd]     = useState('')
+  const [hours, setHours]     = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
   const nextIndex = (project.project_stages?.length || 0)
 
+  const isHours = project.tracking_type === 'hours'
+  const allocated = (project.project_stages || []).reduce((s, st) => s + (Number(st.allocated_hours) || 0), 0)
+  const remaining = Number(project.total_hours || 0) - allocated
+
   async function handleAdd(e) {
     e.preventDefault()
+    setError('')
     if (!name.trim()) { setError('Stage name is required.'); return }
+    if (isHours && (!hours || Number(hours) <= 0)) { setError('A positive hour allocation is required.'); return }
+    if (!isHours && !startDate) { setError('A stage start date is required.'); return }
     setLoading(true)
 
-    const { data: stage, error: stageErr } = await supabase
-      .from('project_stages')
-      .insert({
-        project_id: project.id, name: name.trim(),
-        start_date: startDate || null, end_date: endDate || null,
-        order_index: nextIndex, created_by: profile.id,
-      })
-      .select()
-      .single()
-    if (stageErr) { setError(stageErr.message); setLoading(false); return }
-
-    await supabase.from('project_stage_logs').insert({
-      stage_id: stage.id, project_id: project.id, changed_by: profile.id,
-      change_type: 'create', new_start: startDate || null, new_end: endDate || null,
+    const { error: sErr } = await supabase.rpc('create_stage', {
+      p_project: project.id, p_name: name.trim(),
+      p_start: !isHours ? startDate : null,
+      p_end:   !isHours ? (endDate || null) : null,
+      p_allocated: isHours ? Number(hours) : null,
+      p_order: nextIndex,
     })
+    if (sErr) { setError(sErr.message); setLoading(false); return }
 
     setLoading(false)
     onCreated()
@@ -228,11 +263,19 @@ function AddStageModal({ project, onClose, onCreated }) {
         <Field label="Stage name *">
           <input type="text" value={name} onChange={e => setName(e.target.value)} className="input" placeholder="e.g. Construction Documents" required autoFocus />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Start date"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" /></Field>
-          <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
-        </div>
-        <p className="text-xs text-gray-400">Dates can be left undefined and set later.</p>
+        {isHours ? (
+          <Field label="Stage hours *" hint={`${remaining}h unallocated remaining in the pool.`}>
+            <input type="number" min="0" step="0.5" max={remaining} value={hours} onChange={e => setHours(e.target.value)} className="input text-sm" placeholder={`max ${remaining}`} required />
+          </Field>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Start date *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
+              <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
+            </div>
+            <p className="text-xs text-gray-400">Must fall within the project timeline. End date can be set later.</p>
+          </>
+        )}
         <ErrorBox msg={error} />
         <div className="flex gap-3 pt-1">
           <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
@@ -245,106 +288,112 @@ function AddStageModal({ project, onClose, onCreated }) {
   )
 }
 
-// ── Date Action Modal ────────────────────────────────────────────
-// action: 'define_both' | 'define_start' | 'define_end' | 'extend_end'
-function DateActionModal({ stage, project, action, onClose, onDone }) {
-  const { profile } = useAuth()
-  const [newStart, setNewStart] = useState('')
-  const [newEnd, setNewEnd]     = useState('')
-  const [reason, setReason]     = useState('')
-  const [loading, setLoading]   = useState(false)
-  const [error, setError]       = useState('')
+// ── Edit Stage Modal (dates or hours; transactional via RPC) ──────
+function EditStageModal({ stage, project, onClose, onDone }) {
+  const isHours = project.tracking_type === 'hours'
+  const [startDate, setStart] = useState(stage.start_date || '')
+  const [endDate, setEnd]     = useState(stage.end_date || '')
+  const [hours, setHours]     = useState(stage.allocated_hours ?? '')
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState('')
+  const [confirmExtend, setConfirmExtend] = useState(null)  // pending message
 
-  const requiresReason = action === 'extend_end'
-  const showStart = action === 'define_both' || action === 'define_start'
-  const showEnd   = action === 'define_both' || action === 'define_end' || action === 'extend_end'
-
-  const titles = {
-    define_both:  'Define dates',
-    define_start: 'Define start date',
-    define_end:   'Define end date',
-    extend_end:   'Extend end date',
-  }
-
-  async function handleSubmit(e) {
-    e.preventDefault()
-    if (requiresReason && !reason.trim()) { setError('A reason is required to extend a date.'); return }
-    if (action === 'extend_end' && newEnd && newEnd <= stage.end_date) {
-      setError(`New end date must be after the current end date (${formatDate(stage.end_date)}).`)
-      return
-    }
-    if (action === 'define_both' && !newStart && !newEnd) { setError('Set at least one date.'); return }
-
-    const updates = {}
-    if (showStart && newStart) updates.start_date = newStart
-    if (showEnd && newEnd) updates.end_date = newEnd
-
-    if (Object.keys(updates).length === 0) { setError('Set at least one date.'); return }
-
-    setLoading(true)
-    const { error: upErr } = await supabase.from('project_stages').update(updates).eq('id', stage.id)
-    if (upErr) { setError(upErr.message); setLoading(false); return }
-
-    await supabase.from('project_stage_logs').insert({
-      stage_id: stage.id, project_id: project.id, changed_by: profile.id,
-      change_type: action,
-      old_start: stage.start_date || null, new_start: updates.start_date ?? stage.start_date ?? null,
-      old_end: stage.end_date || null, new_end: updates.end_date ?? stage.end_date ?? null,
-      reason: reason.trim() || null,
+  async function submit(confirm) {
+    setLoading(true); setError('')
+    const { error: err } = await supabase.rpc('update_stage_boundary', {
+      p_stage: stage.id,
+      p_start: !isHours ? (startDate || null) : null,
+      p_end:   !isHours ? (endDate || null) : null,
+      p_allocated: isHours ? Number(hours) : null,
+      p_confirm_extend: !!confirm,
     })
-
     setLoading(false)
-    onDone()
-    onClose()
+    if (err) {
+      if (err.message.includes('CONFIRM_EXTEND')) {
+        setConfirmExtend(err.message.replace(/^.*CONFIRM_EXTEND:\s*/, ''))
+        return
+      }
+      setError(err.message); return
+    }
+    onDone(); onClose()
   }
 
   return (
-    <Modal title={`${titles[action]} — ${stage.name}`} icon={<Calendar size={15} className="text-ae7-red" />} onClose={onClose}>
-      <form onSubmit={handleSubmit} className="p-6 space-y-4">
-        {stage.start_date || stage.end_date ? (
-          <div className="bg-gray-50 dark:bg-gray-800 rounded-xl px-4 py-3 text-xs text-gray-500">
-            Current: {formatDate(stage.start_date) || 'Not set'} → {formatDate(stage.end_date) || 'Not set'}
+    <Modal title={`Edit stage — ${stage.name}`} icon={<Pencil size={15} className="text-ae7-red" />} onClose={onClose}>
+      <form onSubmit={e => { e.preventDefault(); submit(false) }} className="p-6 space-y-4">
+        {isHours ? (
+          <Field label="Stage hours *" hint={`${Number(stage.logged_hours || 0)}h already logged — allocation can't go below that.`}>
+            <input type="number" min="0" step="0.5" value={hours} onChange={e => setHours(e.target.value)} className="input text-sm" required />
+          </Field>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Start date *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
+            <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
           </div>
-        ) : null}
+        )}
 
-        {showStart && (
-          <Field label="Start date" hint={action === 'define_both' ? 'Optional' : undefined}>
-            <input type="date" value={newStart} onChange={e => setNewStart(e.target.value)} className="input" />
-          </Field>
+        {confirmExtend && (
+          <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-md px-3 py-2.5 text-xs text-amber-700 dark:text-amber-400 space-y-2">
+            <p className="flex items-start gap-1.5"><AlertTriangle size={13} className="flex-shrink-0 mt-0.5" /> {confirmExtend}</p>
+            <button type="button" onClick={() => submit(true)} disabled={loading} className="btn-primary text-xs">
+              Confirm & extend project deadline
+            </button>
+          </div>
         )}
-        {showEnd && (
-          <Field
-            label={action === 'extend_end' ? 'New end date *' : 'End date'}
-            hint={action === 'extend_end' ? `Must be after ${formatDate(stage.end_date)}` : action === 'define_both' ? 'Optional' : undefined}
-          >
-            <input
-              type="date"
-              value={newEnd}
-              min={action === 'extend_end' ? (stage.end_date || undefined) : undefined}
-              onChange={e => setNewEnd(e.target.value)}
-              className="input"
-            />
+
+        <ErrorBox msg={error} />
+        <div className="flex gap-3 pt-1">
+          <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button type="submit" disabled={loading} className="btn-primary flex-1">
+            {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <><Check size={15} /> Save changes</>}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// ── Edit Project Boundary Modal ──────────────────────────────────
+function EditProjectModal({ project, onClose, onDone }) {
+  const isHours = project.tracking_type === 'hours'
+  const [startDate, setStart] = useState(project.start_date || '')
+  const [endDate, setEnd]     = useState(project.end_date || '')
+  const [total, setTotal]     = useState(project.total_hours ?? '')
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState('')
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    setLoading(true); setError('')
+    const { error: err } = await supabase.rpc('update_project_boundary', {
+      p_project: project.id,
+      p_start: !isHours ? (startDate || null) : null,
+      p_end:   !isHours ? (endDate || null) : null,
+      p_total_hours: isHours ? Number(total) : null,
+    })
+    setLoading(false)
+    if (err) { setError(err.message); return }
+    onDone(); onClose()
+  }
+
+  return (
+    <Modal title={`Edit project — ${project.name}`} icon={<Pencil size={15} className="text-ae7-red" />} onClose={onClose}>
+      <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        {isHours ? (
+          <Field label="Total hour pool *" hint="Cannot drop below the hours already allocated to stages.">
+            <input type="number" min="0" step="0.5" value={total} onChange={e => setTotal(e.target.value)} className="input text-sm" required />
           </Field>
-        )}
-        {requiresReason && (
-          <Field label="Reason for extension *">
-            <textarea
-              value={reason}
-              onChange={e => setReason(e.target.value)}
-              className="input min-h-[80px] resize-none"
-              placeholder="e.g. Client requested additional design revisions"
-              required
-            />
-          </Field>
-        )}
-        {!requiresReason && (
-          <p className="text-xs text-gray-400">This change will be logged automatically.</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Project start *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
+            <Field label="Project end"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
+          </div>
         )}
         <ErrorBox msg={error} />
         <div className="flex gap-3 pt-1">
           <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
           <button type="submit" disabled={loading} className="btn-primary flex-1">
-            {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <><Check size={15} /> {titles[action]}</>}
+            {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <><Check size={15} /> Save changes</>}
           </button>
         </div>
       </form>
@@ -537,49 +586,53 @@ function ImportModal({ existingProjects, onClose, onImported }) {
 }
 
 // ── Stage Row ────────────────────────────────────────────────────
-function StageRow({ stage, project, onDateAction, onArchiveStage, readonly }) {
-  const state = getStageDateState(stage)
-  const startLabel = formatDate(stage.start_date)
-  const endLabel   = formatDate(stage.end_date)
+const STAGE_STATE = {
+  active:      { label: 'Active',      cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
+  soft_closed: { label: 'Soft-closed', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' },
+  hard_locked: { label: 'Locked',      cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
+}
+
+function StageRow({ stage, project, onEditStage, onArchiveStage, readonly }) {
+  const isHours = project.tracking_type === 'hours'
+  const state   = stage.effective_state || stage.tracking_state || 'active'
+  const sc      = STAGE_STATE[state] || STAGE_STATE.active
+  const logged  = Number(stage.logged_hours || 0)
+  const alloc   = Number(stage.allocated_hours || 0)
+  const over    = isHours && alloc > 0 && logged > alloc
+  const pct     = isHours && alloc > 0 ? Math.min(100, (logged / alloc) * 100) : 0
 
   return (
     <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-gray-50 dark:bg-gray-800/40 flex-wrap">
-      <div className="min-w-0">
-        <p className="text-sm font-medium">{stage.name}</p>
-        <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1">
-          <CalendarDays size={11} />
-          {startLabel ? startLabel : <span className="italic">Start not set</span>}
-          <span className="mx-0.5">→</span>
-          {endLabel ? endLabel : <span className="italic">End not set</span>}
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium flex items-center gap-2 flex-wrap">
+          {stage.name}
+          <span className={clsx('text-xs px-2 py-0.5 rounded-full', sc.cls)}>{sc.label}</span>
+          {over && <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">Over budget</span>}
         </p>
+        {isHours ? (
+          <div className="mt-1.5 max-w-xs">
+            <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+              <span><ScrollText size={11} className="inline mr-1" />{logged}h / {alloc}h</span>
+              <span>{alloc > 0 ? Math.round((logged / alloc) * 100) : 0}%</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+              <div className={clsx('h-full rounded-full', over ? 'bg-red-500' : 'bg-ae7-red')} style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1">
+            <CalendarDays size={11} />
+            {formatDate(stage.start_date) || <span className="italic">Start not set</span>}
+            <span className="mx-0.5">→</span>
+            {formatDate(stage.end_date) || <span className="italic">End not set</span>}
+          </p>
+        )}
       </div>
       {!readonly && (
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {state === 'none' && (
-            <button onClick={() => onDateAction(stage, project, 'define_both')} className="btn-secondary text-xs px-2.5 py-1.5">
-              <Calendar size={12} /> Define Dates
-            </button>
-          )}
-          {state === 'start_only' && (
-            <button onClick={() => onDateAction(stage, project, 'define_end')} className="btn-secondary text-xs px-2.5 py-1.5">
-              <Calendar size={12} /> Define End Date
-            </button>
-          )}
-          {state === 'end_only' && (
-            <>
-              <button onClick={() => onDateAction(stage, project, 'define_start')} className="btn-secondary text-xs px-2.5 py-1.5">
-                <Calendar size={12} /> Define Start
-              </button>
-              <button onClick={() => onDateAction(stage, project, 'extend_end')} className="btn-secondary text-xs px-2.5 py-1.5 text-amber-600 dark:text-amber-400">
-                <CalendarDays size={12} /> Extend End
-              </button>
-            </>
-          )}
-          {state === 'both' && (
-            <button onClick={() => onDateAction(stage, project, 'extend_end')} className="btn-secondary text-xs px-2.5 py-1.5 text-amber-600 dark:text-amber-400">
-              <CalendarDays size={12} /> Extend End Date
-            </button>
-          )}
+          <button onClick={() => onEditStage(stage, project)} className="btn-secondary text-xs px-2.5 py-1.5">
+            <Pencil size={12} /> Edit
+          </button>
           <button
             onClick={() => onArchiveStage(stage, project)}
             className="p-1.5 rounded-lg text-gray-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/20 transition-colors"
@@ -594,12 +647,18 @@ function StageRow({ stage, project, onDateAction, onArchiveStage, readonly }) {
 }
 
 // ── Project Card ─────────────────────────────────────────────────
-function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, onManageMembers, onArchive, onArchiveStage }) {
+function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onEditProject, onManageMembers, onArchive, onArchiveStage }) {
   const members        = project.project_members || []
   const allStages      = (project.project_stages || []).sort((a, b) => a.order_index - b.order_index)
   const stages         = allStages.filter(s => !s.is_archived)
   const archivedStages = allStages.filter(s => s.is_archived)
   const isArchived     = project.status === 'archived'
+  const isHours        = project.tracking_type === 'hours'
+  const totalAlloc     = allStages.reduce((s, st) => s + (Number(st.allocated_hours) || 0), 0)
+  const totalLogged    = allStages.reduce((s, st) => s + (Number(st.logged_hours) || 0), 0)
+  const metaLabel      = isHours
+    ? `Hours · ${totalLogged}/${project.total_hours ?? 0}h logged · ${Math.max(0, (project.total_hours ?? 0) - totalAlloc)}h unallocated`
+    : `Dates · ${formatDate(project.start_date) || '—'} → ${formatDate(project.end_date) || 'ongoing'}`
 
   return (
     <div className={clsx('card overflow-hidden', isArchived && 'opacity-60')}>
@@ -612,9 +671,14 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, on
             <Briefcase size={15} className="text-ae7-red" />
           </div>
           <div className="min-w-0">
-            <p className="font-semibold text-sm truncate">{project.name}</p>
-            <p className="text-xs text-gray-400">
-              {stages.length} {stages.length === 1 ? 'stage' : 'stages'} · {members.length} {members.length === 1 ? 'member' : 'members'}
+            <p className="font-semibold text-sm truncate flex items-center gap-2">
+              {project.name}
+              <span className={clsx('text-[10px] px-1.5 py-0.5 rounded-full font-medium', isHours ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300' : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300')}>
+                {isHours ? 'Hours' : 'Dates'}
+              </span>
+            </p>
+            <p className="text-xs text-gray-400 truncate">
+              {stages.length} {stages.length === 1 ? 'stage' : 'stages'} · {members.length} {members.length === 1 ? 'member' : 'members'} · {metaLabel}
             </p>
           </div>
         </div>
@@ -648,7 +712,7 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, on
               ) : stages.length === 0 ? (
                 <p className="text-sm text-gray-400 italic">No active stages.</p>
               ) : stages.map(s => (
-                <StageRow key={s.id} stage={s} project={project} onDateAction={onDateAction} onArchiveStage={onArchiveStage} readonly={isArchived} />
+                <StageRow key={s.id} stage={s} project={project} onEditStage={onEditStage} onArchiveStage={onArchiveStage} readonly={isArchived} />
               ))}
               {archivedStages.length > 0 && (
                 <p className="text-xs text-gray-400 italic pt-1">
@@ -683,7 +747,13 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onDateAction, on
 
           {/* Footer actions */}
           {!isArchived && (
-            <div className="flex justify-end pt-1 border-t border-gray-100 dark:border-gray-800">
+            <div className="flex justify-between items-center pt-1 border-t border-gray-100 dark:border-gray-800">
+              <button
+                onClick={() => onEditProject(project)}
+                className="text-xs text-gray-500 hover:text-ae7-red flex items-center gap-1 transition-colors"
+              >
+                <Pencil size={12} /> Edit {isHours ? 'hour pool' : 'timeline'}
+              </button>
               <button
                 onClick={() => onArchive(project)}
                 className="text-xs text-gray-400 hover:text-red-500 flex items-center gap-1 transition-colors"
@@ -707,9 +777,9 @@ function LogsTab({ projects }) {
 
   useEffect(() => {
     supabase
-      .from('project_stage_logs')
+      .from('project_audit_logs')
       .select(`
-        id, change_type, old_start, new_start, old_end, new_end, reason, created_at,
+        id, field, old_value, new_value, created_at, project_id,
         project_stages!stage_id (name),
         projects!project_id (id, name),
         profiles!changed_by (full_name, email)
@@ -767,30 +837,19 @@ function LogsTab({ projects }) {
                   {format(new Date(log.created_at), 'dd MMM yyyy HH:mm')}
                 </span>
                 <span className="col-span-2 font-medium truncate">{log.projects?.name}</span>
-                <span className="col-span-2 text-gray-600 dark:text-gray-400 truncate">{log.project_stages?.name}</span>
-                <span className="col-span-2">
-                  <span className={clsx(
-                    'text-xs font-medium px-2 py-0.5 rounded-full',
-                    log.change_type === 'create'       ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
-                    log.change_type === 'extend_end'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' :
-                    'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
-                  )}>
-                    {changeTypeLabel[log.change_type] || log.change_type}
+                <span className="col-span-2 text-gray-600 dark:text-gray-400 truncate">{log.project_stages?.name || '—'}</span>
+                <span className="col-span-3">
+                  <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                    {(log.field || '').replace(/_/g, ' ')}
                   </span>
                 </span>
-                <div className="col-span-2 text-xs text-gray-500">
-                  {(log.old_start || log.old_end) ? (
-                    <span className="line-through text-red-400">{log.old_start ? formatDate(log.old_start) : '—'} → {log.old_end ? formatDate(log.old_end) : '—'}</span>
-                  ) : null}
-                  {(log.new_start || log.new_end) && (
-                    <span className="text-emerald-600 dark:text-emerald-400 block">
-                      {log.new_start ? formatDate(log.new_start) : '—'} → {log.new_end ? formatDate(log.new_end) : '—'}
-                    </span>
-                  )}
-                </div>
-                <div className="col-span-2 min-w-0">
-                  <p className="text-xs text-gray-500 truncate">{log.profiles?.full_name || log.profiles?.email}</p>
-                  {log.reason && <p className="text-xs text-gray-400 italic truncate mt-0.5">"{log.reason}"</p>}
+                <div className="col-span-3 min-w-0 text-xs">
+                  <span className="text-gray-500">
+                    <span className="line-through text-red-400">{log.old_value ?? '—'}</span>
+                    <span className="mx-1">→</span>
+                    <span className="text-emerald-600 dark:text-emerald-400">{log.new_value ?? '—'}</span>
+                  </span>
+                  <p className="text-gray-400 truncate mt-0.5">by {log.profiles?.full_name || log.profiles?.email}</p>
                 </div>
               </div>
             ))}
@@ -815,23 +874,31 @@ export default function ProjectsPage() {
   // Modals
   const [showCreate, setShowCreate]     = useState(false)
   const [addStageFor, setAddStageFor]   = useState(null)
-  const [dateTarget, setDateTarget]     = useState(null)  // { stage, project, action }
+  const [editStageFor, setEditStageFor] = useState(null)  // { stage, project }
+  const [editProjectFor, setEditProjectFor] = useState(null)
   const [membersFor, setMembersFor]     = useState(null)
   const [showImport, setShowImport]     = useState(false)
 
   const loadProjects = useCallback(async () => {
-    const { data } = await supabase
-      .from('projects')
-      .select(`
-        id, name, description, status, created_at,
-        project_stages (id, name, start_date, end_date, order_index, is_archived, created_at),
-        project_members (
-          id, employee_id,
-          profiles!employee_id (id, full_name, email)
-        )
-      `)
-      .order('created_at', { ascending: false })
-    if (data) setProjects(data)
+    const [{ data: projs }, { data: stages }] = await Promise.all([
+      supabase
+        .from('projects')
+        .select(`
+          id, name, description, status, created_at,
+          tracking_type, start_date, end_date, total_hours,
+          project_members (
+            id, employee_id,
+            profiles!employee_id (id, full_name, email)
+          )
+        `)
+        .order('created_at', { ascending: false }),
+      // computed view: effective_state + logged_hours per stage
+      supabase.from('project_stages_view').select('*').order('order_index'),
+    ])
+    const byProject = {}
+    ;(stages || []).forEach(s => { (byProject[s.project_id] ||= []).push(s) })
+    const merged = (projs || []).map(p => ({ ...p, project_stages: byProject[p.id] || [] }))
+    setProjects(merged)
     setLoading(false)
   }, [])
 
@@ -885,11 +952,18 @@ export default function ProjectsPage() {
       {addStageFor && (
         <AddStageModal project={addStageFor} onClose={() => setAddStageFor(null)} onCreated={() => { loadProjects(); showToast('Stage added.') }} />
       )}
-      {dateTarget && (
-        <DateActionModal
-          stage={dateTarget.stage} project={dateTarget.project} action={dateTarget.action}
-          onClose={() => setDateTarget(null)}
+      {editStageFor && (
+        <EditStageModal
+          stage={editStageFor.stage} project={editStageFor.project}
+          onClose={() => setEditStageFor(null)}
           onDone={() => { loadProjects(); showToast('Stage updated.') }}
+        />
+      )}
+      {editProjectFor && (
+        <EditProjectModal
+          project={editProjectFor}
+          onClose={() => setEditProjectFor(null)}
+          onDone={() => { loadProjects(); showToast('Project updated.') }}
         />
       )}
       {membersFor && (
@@ -944,7 +1018,8 @@ export default function ProjectsPage() {
                   expanded={expanded === p.id}
                   onToggle={() => setExpanded(expanded === p.id ? null : p.id)}
                   onAddStage={setAddStageFor}
-                  onDateAction={(stage, project, action) => setDateTarget({ stage, project, action })}
+                  onEditStage={(stage, project) => setEditStageFor({ stage, project })}
+                  onEditProject={setEditProjectFor}
                   onManageMembers={setMembersFor}
                   onArchive={handleArchive}
                   onArchiveStage={handleArchiveStage}
@@ -973,7 +1048,8 @@ export default function ProjectsPage() {
                     expanded={expanded === p.id}
                     onToggle={() => setExpanded(expanded === p.id ? null : p.id)}
                     onAddStage={() => {}}
-                    onDateAction={() => {}}
+                    onEditStage={() => {}}
+                    onEditProject={() => {}}
                     onManageMembers={() => {}}
                     onArchive={() => {}}
                     onArchiveStage={() => {}}
