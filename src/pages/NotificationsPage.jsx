@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { Bell, CheckCheck, Trash2 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 const typeConfig = {
   submission: { color: 'bg-blue-500',    label: 'Submission' },
@@ -72,7 +73,7 @@ export default function NotificationsPage() {
       </div>
 
       {loading ? (
-        <div className="text-center py-16 text-gray-400 text-sm">Loading…</div>
+        <div className="card overflow-hidden"><SkeletonList rows={6} /></div>
       ) : notifications.length === 0 ? (
         <div className="card p-12 text-center">
           <Bell size={40} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

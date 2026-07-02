@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase'
 import { ShieldAlert, Search } from 'lucide-react'
 import { leaveRange } from '../../pages/RequestsPage'
 import Pagination from '../Pagination'
+import { SkeletonList } from '../Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -56,7 +57,7 @@ export default function HRRevoke() {
 
       <div className="card overflow-hidden">
         {loading ? (
-          <div className="text-center py-12 text-gray-400 text-sm">Loading…</div>
+          <SkeletonList rows={6} />
         ) : shown.length === 0 ? (
           <div className="text-center py-12">
             <ShieldAlert size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

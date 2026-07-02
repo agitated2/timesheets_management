@@ -4,6 +4,7 @@ import { FileText, Download, ChevronDown, ChevronRight, Filter } from 'lucide-re
 import { format, parseISO, startOfMonth } from 'date-fns'
 import MultiSelect from '../MultiSelect'
 import clsx from 'clsx'
+import { SkeletonList } from '../Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -209,7 +210,7 @@ export default function HRTimesheets() {
       {/* Results */}
       <div className="card overflow-hidden">
         {loading ? (
-          <div className="text-center py-12 text-gray-400 text-sm">Loading…</div>
+          <SkeletonList rows={6} />
         ) : shown.length === 0 ? (
           <div className="text-center py-12">
             <FileText size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

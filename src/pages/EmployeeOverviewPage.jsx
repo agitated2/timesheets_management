@@ -7,6 +7,7 @@ import {
 import Pagination from '../components/Pagination'
 import EmployeeCalendarModal from '../components/EmployeeCalendarModal'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -192,7 +193,7 @@ export default function EmployeeOverviewPage() {
           <span className="hidden md:flex items-center gap-1"><CalendarDays size={12} /> Calendar</span>
         </div>
         {loading ? (
-          <div className="text-center py-12 text-gray-400 text-sm">Loading…</div>
+          <SkeletonList rows={6} />
         ) : shown.length === 0 ? (
           <div className="text-center py-12">
             <Users size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

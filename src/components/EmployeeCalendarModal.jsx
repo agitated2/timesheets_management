@@ -10,6 +10,7 @@ import {
   addMonths, subMonths, format, isSameMonth, isToday, getDay, parseISO,
 } from 'date-fns'
 import clsx from 'clsx'
+import { Skeleton } from './Skeleton'
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -164,7 +165,7 @@ export default function EmployeeCalendarModal({ employee, onClose }) {
           </div>
 
           {loading ? (
-            <div className="py-16 text-center text-sm text-gray-400">Loading…</div>
+            <div className="py-4"><Skeleton className="h-64 w-full" /></div>
           ) : (
             <>
               {/* Grid */}

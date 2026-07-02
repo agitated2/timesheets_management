@@ -8,6 +8,7 @@ import {
 import { format, parseISO } from 'date-fns'
 import Pagination from '../components/Pagination'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -297,7 +298,7 @@ export default function RequestsPage() {
           <h2 className="font-semibold text-sm">My requests</h2>
         </div>
         {loading ? (
-          <div className="text-center py-12 text-gray-400 text-sm">Loading…</div>
+          <SkeletonList rows={4} />
         ) : requests.length === 0 ? (
           <div className="text-center py-12">
             <HeartHandshake size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

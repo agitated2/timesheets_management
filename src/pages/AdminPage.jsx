@@ -9,6 +9,7 @@ import {
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
+import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -402,7 +403,7 @@ function UserTimesheetsModal({ user: target, onClose, onDeleted }) {
     >
       <div className="p-6 space-y-4">
         {loading ? (
-          <div className="py-10 text-center text-sm text-gray-400">Loading…</div>
+          <SkeletonList rows={5} />
         ) : timesheets.length === 0 ? (
           <div className="py-10 text-center text-sm text-gray-400">No timesheets found for this user.</div>
         ) : (
@@ -641,7 +642,7 @@ export default function AdminPage() {
             </div>
 
             {loading ? (
-              <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
+              <SkeletonList rows={6} />
             ) : shown.length === 0 ? (
               <div className="p-8 text-center text-gray-400 text-sm">No users found.</div>
             ) : (

@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { Hourglass, CheckSquare, XCircle, Search, ArrowRight } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 const statusCfg = {
   pending:  { label: 'Pending',  icon: Hourglass,   cls: 'text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-400' },
@@ -87,7 +88,7 @@ export default function ReviewsPage() {
       </div>
 
       {loading ? (
-        <div className="text-center py-16 text-gray-400 text-sm">Loading…</div>
+        <div className="card overflow-hidden"><SkeletonList rows={6} /></div>
       ) : shown.length === 0 ? (
         <div className="card p-12 text-center">
           <CheckSquare size={40} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

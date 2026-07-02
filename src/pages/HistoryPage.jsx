@@ -8,6 +8,7 @@ import {
   ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Clock,
 } from 'lucide-react'
 import { format } from 'date-fns'
+import { SkeletonList } from '../components/Skeleton'
 import clsx from 'clsx'
 
 const PAGE_SIZE = 10
@@ -230,7 +231,7 @@ export default function HistoryPage() {
       </div>
 
       {loading ? (
-        <div className="text-center py-16 text-gray-400">Loading…</div>
+        <div className="card overflow-hidden"><SkeletonList rows={6} /></div>
       ) : shown.length === 0 ? (
         <div className="card p-12 text-center">
           <Clock size={40} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

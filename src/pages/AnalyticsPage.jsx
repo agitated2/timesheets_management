@@ -9,6 +9,7 @@ import { format, subDays, addDays, eachDayOfInterval, isWeekend, parseISO } from
 import { Download, Filter, BarChart2, TrendingUp, ChevronDown, Check } from 'lucide-react'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
+import { Skeleton, SkeletonStats } from '../components/Skeleton'
 
 const COLORS = ['#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899','#14B8A6','#F97316','#6366F1','#84CC16']
 
@@ -204,7 +205,10 @@ function ProjectInsights({ dark }) {
       </div>
 
       {loading ? (
-        <div className="text-center py-16 text-gray-400 text-sm">Loading project data…</div>
+        <div className="space-y-4">
+          <SkeletonStats count={4} />
+          <div className="card p-6"><Skeleton className="h-64 w-full" /></div>
+        </div>
       ) : !project ? (
         <div className="card p-12 text-center text-gray-500">No project selected.</div>
       ) : (
@@ -497,9 +501,9 @@ export default function AnalyticsPage() {
       </div>
 
       {loading ? (
-        <div className="text-center py-20 text-gray-400">
-          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          Loading data…
+        <div className="space-y-4">
+          <SkeletonStats count={4} />
+          <div className="card p-6"><Skeleton className="h-64 w-full" /></div>
         </div>
       ) : filtered.length === 0 ? (
         <div className="card p-12 text-center">

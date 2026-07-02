@@ -4,6 +4,7 @@ import { CalendarDays, Plus, Trash2, Check, Users, X } from 'lucide-react'
 import MultiSelect from '../MultiSelect'
 import Pagination from '../Pagination'
 import { format, parseISO } from 'date-fns'
+import { Skeleton } from '../Skeleton'
 import clsx from 'clsx'
 
 const ASSIGN_PAGE_SIZE = 10
@@ -120,7 +121,7 @@ export default function HRCalendar() {
   const assignCurrent    = Math.min(assignPage, assignTotalPages)
   const assignShown      = assignedHere.slice((assignCurrent - 1) * ASSIGN_PAGE_SIZE, assignCurrent * ASSIGN_PAGE_SIZE)
 
-  if (loading) return <div className="card p-12 text-center text-sm text-gray-400">Loading…</div>
+  if (loading) return <div className="card p-6"><Skeleton className="h-72 w-full" /></div>
 
   return (
     <div className="grid lg:grid-cols-3 gap-6">

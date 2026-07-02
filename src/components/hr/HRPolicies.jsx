@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase'
 import { Tags, Plus, Check, X, Power } from 'lucide-react'
 import MultiSelect from '../MultiSelect'
 import clsx from 'clsx'
+import { SkeletonList } from '../Skeleton'
 
 export default function HRPolicies() {
   const [categories, setCategories] = useState([])
@@ -69,7 +70,7 @@ export default function HRPolicies() {
     setBalEmps([]); setBalAmount('')
   }
 
-  if (loading) return <div className="card p-12 text-center text-sm text-gray-400">Loading…</div>
+  if (loading) return <div className="card overflow-hidden"><SkeletonList rows={6} /></div>
 
   return (
     <div className="grid lg:grid-cols-2 gap-6">

@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { Upload, Clock, CheckSquare, XCircle, Hourglass, TrendingUp, Users, FileText, AlertCircle } from 'lucide-react'
 import { format, subDays } from 'date-fns'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 const statusConfig = {
   pending:  { label: 'Pending',  color: 'text-amber-600 dark:text-amber-400',   bg: 'bg-amber-50  dark:bg-amber-950/30',  icon: Hourglass },
@@ -79,7 +80,7 @@ function EmployeeDashboard({ profile }) {
         <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Recent submissions</h2>
         </div>
-        {loading ? <div className="p-8 text-center text-gray-400 text-sm">Loading…</div> : timesheets.length === 0 ? (
+        {loading ? <SkeletonList rows={5} /> : timesheets.length === 0 ? (
           <div className="p-8 text-center">
             <FileText size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />
             <p className="text-sm text-gray-500">No timesheets yet. Upload your first one!</p>
@@ -158,7 +159,7 @@ function ManagerDashboard({ profile }) {
             </span>
           )}
         </div>
-        {loading ? <div className="p-8 text-center text-gray-400 text-sm">Loading…</div> : pending.length === 0 ? (
+        {loading ? <SkeletonList rows={5} /> : pending.length === 0 ? (
           <div className="p-8 text-center">
             <CheckSquare size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />
             <p className="text-sm text-gray-500">All caught up! No pending reviews.</p>
@@ -235,7 +236,7 @@ function GlobalDashboard({ profile }) {
         <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Recent activity</h2>
         </div>
-        {loading ? <div className="p-8 text-center text-gray-400 text-sm">Loading…</div> : (
+        {loading ? <SkeletonList rows={5} /> : (
           <div className="divide-y divide-gray-100 dark:divide-gray-800">
             {recent.map(t => {
               const { label, color, bg, icon: Icon } = statusConfig[t.status] ?? statusConfig.pending

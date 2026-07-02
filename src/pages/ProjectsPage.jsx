@@ -10,6 +10,7 @@ import {
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
+import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -550,7 +551,7 @@ function ImportModal({ existingProjects, onClose, onImported }) {
     <Modal title="Import from timesheets" icon={<Download size={15} className="text-ae7-red" />} onClose={onClose}>
       <div className="p-6 space-y-4">
         {loading ? (
-          <div className="py-8 text-center text-sm text-gray-400">Scanning timesheet entries…</div>
+          <SkeletonList rows={5} />
         ) : names.length === 0 ? (
           <div className="py-8 text-center text-sm text-gray-400">
             No unmanaged projects found in existing timesheets.
@@ -814,7 +815,7 @@ function LogsTab({ projects }) {
       </div>
 
       {loading ? (
-        <div className="card p-12 text-center text-sm text-gray-400">Loading logs…</div>
+        <div className="card overflow-hidden"><SkeletonList rows={6} /></div>
       ) : paginated.length === 0 ? (
         <div className="card p-12 text-center">
           <ScrollText size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />
@@ -997,7 +998,7 @@ export default function ProjectsPage() {
           </div>
 
           {loading ? (
-            <div className="text-center py-16 text-gray-400">Loading…</div>
+            <div className="card overflow-hidden"><SkeletonList rows={6} /></div>
           ) : shown.length === 0 ? (
             <div className="card p-12 text-center">
               <Briefcase size={40} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />

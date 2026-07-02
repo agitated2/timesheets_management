@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
 
@@ -384,7 +385,7 @@ function RoleManagementSection() {
       </div>
 
       {loading ? (
-        <div className="p-8 text-center text-gray-400 text-sm">Loading users…</div>
+        <SkeletonList rows={6} />
       ) : filtered.length === 0 ? (
         <div className="p-8 text-center text-gray-400 text-sm">No users found.</div>
       ) : (

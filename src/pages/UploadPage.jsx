@@ -10,6 +10,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { canLogToStage, isOverBudget, isStageSelectable } from '../lib/projectRules'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
+import { SkeletonList } from '../components/Skeleton'
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -545,7 +546,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
       )}
 
       {loadingProjects ? (
-        <div className="card p-8 text-center text-sm text-gray-400">Loading your projects…</div>
+        <div className="card overflow-hidden"><SkeletonList rows={4} /></div>
       ) : projects.length === 0 ? (
         <div className="card p-8 text-center space-y-3">
           <Briefcase size={36} className="text-gray-300 dark:text-gray-700 mx-auto" />

@@ -4,6 +4,7 @@ import { Users } from 'lucide-react'
 import MultiSelect from '../MultiSelect'
 import { StatusBadge, leaveRange } from '../../pages/RequestsPage'
 import clsx from 'clsx'
+import { SkeletonList } from '../Skeleton'
 
 const PAGE_SIZE = 10
 const STATUSES = ['all', 'pending_manager', 'pending_hr', 'approved', 'rejected', 'cancelled', 'revoked']
@@ -82,7 +83,7 @@ export default function HREmployeeLeaves() {
 
       <div className="card overflow-hidden">
         {loading ? (
-          <div className="text-center py-12 text-gray-400 text-sm">Loading…</div>
+          <SkeletonList rows={6} />
         ) : shown.length === 0 ? (
           <div className="text-center py-12">
             <Users size={36} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />
