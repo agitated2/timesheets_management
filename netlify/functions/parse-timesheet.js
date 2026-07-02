@@ -187,6 +187,7 @@ async function checkProjectViolations(db, userId, days) {
         project_name: entry.project_name,
         stage_name:   entry.stage_name   || null,
         row_number:   entry.row_number   || null,
+        hours:        Number(entry.hours_decimal) || 0,
       })
     }
   }
@@ -195,7 +196,7 @@ async function checkProjectViolations(db, userId, days) {
   // Load all managed projects (active only) with stages + members + constraints
   const { data: projects } = await db
     .from('projects')
-    .select('id, name, tracking_type, total_hours, project_stages(id, name, start_date, end_date, is_archived, allocated_hours, soft_closed_at), project_members(employee_id)')
+    .select('id, name, tracking_type, total_hours, project_stages(id, name, start_date, end_date, is_archived, allocated_hours), project_members(employee_id)')
     .eq('status', 'active')
 
   const projectMap = new Map()
@@ -212,30 +213,11 @@ async function checkProjectViolations(db, userId, days) {
     loggedByStage.set(r.stage_id, (loggedByStage.get(r.stage_id) || 0) + (Number(r.hours_decimal) || 0))
   }
 
-  const today = new Date().toISOString().slice(0, 10)
-  const addDaysISO = (iso, n) => {
-    const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n)
-    return d.toISOString().slice(0, 10)
-  }
-  // Mirror of schema.sql / projectRules: effective stage lifecycle state.
-  function stageState(stage, proj) {
-    const logged = loggedByStage.get(stage.id) || 0
-    if (proj.tracking_type === 'hours' && stage.allocated_hours > 0 && logged >= stage.allocated_hours) {
-      if (stage.soft_closed_at && today > addDaysISO(String(stage.soft_closed_at).slice(0, 10), 5)) return 'hard_locked'
-      return 'soft_closed'
-    }
-    if (proj.tracking_type === 'date' && stage.end_date && today > stage.end_date) {
-      if (today > addDaysISO(stage.end_date, 5)) return 'hard_locked'
-      return 'soft_closed'
-    }
-    return 'active'
-  }
-
   // violationMap groups identical issues, collecting row numbers
   // Key: 'type::project::stage::date'
   const violationMap = new Map()
 
-  function addViolation(type, project, stage, date, row_number) {
+  function addViolation(type, project, stage, date, row_number, extra = {}) {
     const key = `${type}::${project.toLowerCase()}::${(stage || '').toLowerCase()}::${date}`
     if (violationMap.has(key)) {
       if (row_number) violationMap.get(key).rowNumbers.push(row_number)
@@ -243,11 +225,21 @@ async function checkProjectViolations(db, userId, days) {
       violationMap.set(key, {
         type, project, stage: stage || null, date,
         rowNumbers: row_number ? [row_number] : [],
+        ...extra,
       })
     }
   }
 
-  for (const { date, project_name, stage_name, row_number } of pairs) {
+  // Running remaining-pool balance per hour-tracked stage, seeded from the hours
+  // already in the DB. Rows are processed chronologically so the "first N hours
+  // fit, the rest overflow" rule is deterministic across a bulk file — mirroring
+  // the write-time cumulative check in schema.sql.
+  const poolBalance = new Map()  // stage_id → remaining hours
+  const ordered = [...pairs].sort(
+    (a, b) => a.date.localeCompare(b.date) || (a.row_number || 0) - (b.row_number || 0)
+  )
+
+  for (const { date, project_name, stage_name, row_number, hours } of ordered) {
     const p = projectMap.get(project_name.toLowerCase())
 
     if (!p) {
@@ -276,24 +268,30 @@ async function checkProjectViolations(db, userId, days) {
       continue
     }
 
-    // Lifecycle: hard-locked rejects; soft-closed accepts historical work
-    // within the 5-day grace; active is checked against its own window.
-    const state = stageState(matched, p)
-    if (state === 'hard_locked') {
-      addViolation('stage_locked', project_name, stage_name, date, row_number)
+    // DATE-tracked: block before the stage opens or after it ends (forward-dated).
+    // Backdating within [start, end] stays open indefinitely — no grace tail.
+    if (p.tracking_type === 'date') {
+      if (matched.start_date && date < matched.start_date) {
+        addViolation('stage_not_started', project_name, stage_name, date, row_number, { startDate: matched.start_date })
+      } else if (matched.end_date && date > matched.end_date) {
+        addViolation('stage_ended', project_name, stage_name, date, row_number, { endDate: matched.end_date })
+      }
       continue
     }
-    if (state === 'soft_closed') {
-      if (p.tracking_type === 'date' && matched.end_date && date > matched.end_date) {
-        addViolation('stage_expired', project_name, stage_name, date, row_number)
+
+    // HOURS-tracked: cap against the remaining pool, cumulative within the file.
+    if (matched.allocated_hours && matched.allocated_hours > 0) {
+      if (!poolBalance.has(matched.id)) {
+        poolBalance.set(matched.id, matched.allocated_hours - (loggedByStage.get(matched.id) || 0))
       }
-      continue   // hour-pool overrun within grace is allowed (flagged in DB)
-    }
-    // Active date stage: entry must fall on/after the stage start
-    if (p.tracking_type === 'date') {
-      const { start_date: s, end_date: e } = matched
-      if ((s && date < s) || (e && date > e)) {
-        addViolation('stage_expired', project_name, stage_name, date, row_number)
+      const remaining = poolBalance.get(matched.id)
+      if (remaining <= 0) {
+        addViolation('stage_pool_full', project_name, stage_name, date, row_number, { allocated: matched.allocated_hours })
+      } else if (hours > remaining) {
+        addViolation('stage_pool_exceeded', project_name, stage_name, date, row_number, { remaining: round2(remaining) })
+        poolBalance.set(matched.id, 0)  // subsequent rows for this stage overflow too
+      } else {
+        poolBalance.set(matched.id, remaining - hours)
       }
     }
   }

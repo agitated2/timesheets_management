@@ -1,18 +1,24 @@
 // Pure, dependency-free project-constraint rules.
 // This is the single source of truth for the FRONTEND and pre-checks; the
 // database triggers/RPCs in schema.sql mirror this logic and are the hard
-// guarantee. Keep the two in sync.
+// guarantee, and netlify/functions/parse-timesheet.js mirrors it for Excel.
+// Keep all three in sync.
+//
+// Enforcement model (hard blocks, no grace period):
+//   DATE-tracked stage — an entry dated D is loggable iff start_date ≤ D ≤ end_date.
+//     · D < start_date  → 'not_started' (stage hasn't opened; contact line manager)
+//     · D > end_date    → 'ended'       (future-dated work blocked; backdating within
+//                                        the window stays open indefinitely)
+//   HOURS-tracked stage — loggable while the pool has room.
+//     · logged ≥ allocated              → 'pool_full' (blocked for every date)
+//     · entry would exceed remaining    → not blocked here, surfaced via poolFit so
+//                                         the employee can reduce it or request an
+//                                         extension (see poolFit).
 
-export const GRACE_DAYS = 5
+function round2(n) { return Math.round(n * 100) / 100 }
 
 function toISO(d) {
   return d.toISOString().slice(0, 10)
-}
-
-export function addDaysISO(iso, n) {
-  const d = new Date(iso + 'T00:00:00Z')
-  d.setUTCDate(d.getUTCDate() + n)
-  return toISO(d)
 }
 
 export function todayISO(now = new Date()) {
@@ -20,59 +26,50 @@ export function todayISO(now = new Date()) {
 }
 
 /**
- * Effective lifecycle state of a stage.
- * stage: { trackingType:'date'|'hours', allocatedHours, loggedHours, endDate:'YYYY-MM-DD'|null, softClosedAt:ISO|null }
- * Returns 'active' | 'soft_closed' | 'hard_locked'
+ * Can an entry dated `entryDate` be logged to `stage`?
+ * stage: { trackingType:'date'|'hours', startDate, endDate, allocatedHours, loggedHours }
+ * Returns { ok, reason, remaining }
+ *   reason ∈ 'not_started' | 'ended' | 'pool_full' | null
+ *   remaining — hours left in the pool (hours stages only), else null
  */
-export function stageEffectiveState(stage, nowISO = todayISO()) {
-  const { trackingType, allocatedHours = 0, loggedHours = 0, endDate, softClosedAt } = stage
+export function canLogToStage(stage, entryDate) {
+  const { trackingType, startDate, endDate, allocatedHours = 0, loggedHours = 0 } = stage
 
-  if (trackingType === 'hours' && allocatedHours > 0 && loggedHours >= allocatedHours) {
-    if (softClosedAt) {
-      const graceEnd = addDaysISO(String(softClosedAt).slice(0, 10), GRACE_DAYS)
-      if (nowISO > graceEnd) return 'hard_locked'
-    }
-    return 'soft_closed'
+  if (trackingType === 'date') {
+    if (startDate && entryDate < startDate) return { ok: false, reason: 'not_started', remaining: null }
+    if (endDate   && entryDate > endDate)   return { ok: false, reason: 'ended',       remaining: null }
+    return { ok: true, reason: null, remaining: null }
   }
 
-  if (trackingType === 'date' && endDate) {
-    if (nowISO > endDate) {
-      if (nowISO > addDaysISO(endDate, GRACE_DAYS)) return 'hard_locked'
-      return 'soft_closed'
-    }
+  if (trackingType === 'hours' && allocatedHours > 0) {
+    const remaining = round2(allocatedHours - loggedHours)
+    if (remaining <= 0) return { ok: false, reason: 'pool_full', remaining: 0 }
+    return { ok: true, reason: null, remaining }
   }
 
-  return 'active'
+  return { ok: true, reason: null, remaining: null }
 }
 
 /**
- * Can an entry dated `entryDate` be logged to `stage` right now?
- * Returns { ok, reason, grace } — reason ∈ 'locked' | 'future_on_closed' | null
+ * How a proposed `addHours` fits an hour-tracked stage's remaining pool.
+ * Returns { fits, remaining, overflow }.
+ *   overflow > 0 → the entry must be reduced to `remaining` (or an extension requested).
+ * Date-tracked / unbounded stages always fit.
  */
-export function canLogToStage(stage, entryDate, nowISO = todayISO()) {
-  const state = stageEffectiveState(stage, nowISO)
-  if (state === 'hard_locked') return { ok: false, reason: 'locked', grace: false }
-  if (state === 'soft_closed') {
-    // Date-tracked: during grace only accept work dated on/before the closure.
-    if (stage.trackingType === 'date' && stage.endDate && entryDate > stage.endDate) {
-      return { ok: false, reason: 'future_on_closed', grace: true }
-    }
-    return { ok: true, reason: null, grace: true }
+export function poolFit(stage, addHours = 0) {
+  if (stage.trackingType !== 'hours' || !(stage.allocatedHours > 0)) {
+    return { fits: true, remaining: null, overflow: 0 }
   }
-  return { ok: true, reason: null, grace: false }
-}
-
-/** Would adding `addHours` to an hour-tracked stage exceed its pool? */
-export function isOverBudget(stage, addHours = 0) {
-  if (stage.trackingType !== 'hours' || !(stage.allocatedHours > 0)) return false
-  return (stage.loggedHours || 0) + addHours > stage.allocatedHours
+  const remaining = round2((stage.allocatedHours || 0) - (stage.loggedHours || 0))
+  const overflow  = round2(Math.max(0, addHours - remaining))
+  return { fits: overflow <= 0, remaining: Math.max(0, remaining), overflow }
 }
 
 /**
- * Whether a stage should be offered in the selection menu for a given date.
- * Active → always. Soft-closed (date) → only for historical dates within its
- * window. Hard-locked → never.
+ * Whether a stage should be offered in the selection menu for a given entry date.
+ * A stage that hasn't opened, has ended (for this date), or whose pool is
+ * exhausted is not selectable.
  */
-export function isStageSelectable(stage, entryDate, nowISO = todayISO()) {
-  return canLogToStage(stage, entryDate, nowISO).ok
+export function isStageSelectable(stage, entryDate) {
+  return canLogToStage(stage, entryDate).ok
 }

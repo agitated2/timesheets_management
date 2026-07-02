@@ -1091,9 +1091,15 @@ CREATE POLICY "stages_read_analytics" ON public.project_stages
 -- ===============================================================
 -- PROJECT CONSTRAINTS & GOVERNANCE ENGINE
 -- Projects are either DATE-tracked (timeline) or HOURS-tracked (pool).
--- Stage lifecycle (active → soft_closed → hard_locked) is COMPUTED from
--- dates/hours + a 5-day grace period, and enforced at write time so a
--- missing scheduler can never corrupt the data.
+-- Hard enforcement at write time (no grace period):
+--   DATE  — an entry dated D is loggable iff start_date ≤ D ≤ end_date.
+--           D < start_date → blocked ("not opened, contact line manager");
+--           D > end_date   → blocked (future-dated work); backdating within
+--           the window stays open indefinitely.
+--   HOURS — loggable while the pool has room. Pool exhausted → blocked for
+--           every date; an entry exceeding the remaining pool is rejected
+--           (the employee reduces it or requests an extension).
+-- Mirrored by src/lib/projectRules.js and netlify/functions/parse-timesheet.js.
 -- ===============================================================
 
 ALTER TABLE public.profiles
@@ -1214,11 +1220,9 @@ SELECT
   h.logged AS logged_hours,
   CASE
     WHEN p.tracking_type = 'hours' AND s.allocated_hours IS NOT NULL AND s.allocated_hours > 0
-         AND h.logged >= s.allocated_hours THEN
-      CASE WHEN s.soft_closed_at IS NOT NULL AND now() > s.soft_closed_at + INTERVAL '5 days'
-           THEN 'hard_locked' ELSE 'soft_closed' END
-    WHEN p.tracking_type = 'date' AND s.end_date IS NOT NULL AND s.end_date < CURRENT_DATE THEN
-      CASE WHEN CURRENT_DATE > s.end_date + 5 THEN 'hard_locked' ELSE 'soft_closed' END
+         AND h.logged >= s.allocated_hours THEN 'pool_full'
+    WHEN p.tracking_type = 'date' AND s.start_date IS NOT NULL AND CURRENT_DATE < s.start_date THEN 'not_started'
+    WHEN p.tracking_type = 'date' AND s.end_date   IS NOT NULL AND CURRENT_DATE > s.end_date   THEN 'ended'
     ELSE 'active'
   END AS effective_state
 FROM public.project_stages s
@@ -1231,10 +1235,11 @@ LEFT JOIN LATERAL (SELECT public.stage_logged_hours(s.id) AS logged) h ON true;
 CREATE OR REPLACE FUNCTION public.enforce_stage_logging()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_proj   public.projects%ROWTYPE;
-  v_stage  public.project_stages%ROWTYPE;
-  v_date   DATE;
-  v_logged NUMERIC;
+  v_proj      public.projects%ROWTYPE;
+  v_stage     public.project_stages%ROWTYPE;
+  v_date      DATE;
+  v_logged    NUMERIC;
+  v_remaining NUMERIC;
 BEGIN
   -- A stage is required whenever an entry references a project: hours can
   -- never be logged directly to a project (date- or hour-tracked alike).
@@ -1248,37 +1253,31 @@ BEGIN
   SELECT * INTO v_stage FROM public.project_stages WHERE id = NEW.stage_id;
   SELECT * INTO v_proj  FROM public.projects       WHERE id = v_stage.project_id;
   SELECT date INTO v_date FROM public.timesheets   WHERE id = NEW.timesheet_id;
-  v_logged := public.stage_logged_hours(NEW.stage_id);  -- prior cumulative (NEW not yet inserted)
 
-  IF v_proj.tracking_type = 'hours'
-     AND v_stage.allocated_hours IS NOT NULL AND v_stage.allocated_hours > 0
-     AND v_logged >= v_stage.allocated_hours THEN
-    -- Pool already met → soft-closed; hard-locked once 5-day grace passes
-    IF v_stage.soft_closed_at IS NOT NULL AND now() > v_stage.soft_closed_at + INTERVAL '5 days' THEN
-      RAISE EXCEPTION 'Stage "%" is locked: its hour pool is exhausted and the 5-day grace period has passed.', v_stage.name;
+  IF v_proj.tracking_type = 'date' THEN
+    -- Not opened yet: entry dated before the stage start.
+    IF v_stage.start_date IS NOT NULL AND v_date < v_stage.start_date THEN
+      RAISE EXCEPTION 'Stage "%" has not opened yet (starts %). Contact your line manager.', v_stage.name, v_stage.start_date;
     END IF;
-    NEW.is_over_budget := true;
-
-  ELSIF v_proj.tracking_type = 'date'
-        AND v_stage.end_date IS NOT NULL AND v_stage.end_date < CURRENT_DATE THEN
-    -- Date soft-closed; hard-locked once 5-day grace passes
-    IF CURRENT_DATE > v_stage.end_date + 5 THEN
-      RAISE EXCEPTION 'Stage "%" is locked: it ended on % and the 5-day grace period has passed.', v_stage.name, v_stage.end_date;
-    END IF;
-    -- Within grace: only accept work dated on/before closure
-    IF v_date > v_stage.end_date THEN
-      RAISE EXCEPTION 'Stage "%" closed on %. During the grace period you can only log work dated on or before that.', v_stage.name, v_stage.end_date;
+    -- Ended: forward-dated work past the end is blocked; backdating within
+    -- the window stays open indefinitely (no grace / hard-lock tail).
+    IF v_stage.end_date IS NOT NULL AND v_date > v_stage.end_date THEN
+      RAISE EXCEPTION 'Stage "%" ended on %. You can only log work dated on or before that.', v_stage.name, v_stage.end_date;
     END IF;
 
-  ELSE
-    -- Active: flag if this entry pushes an hour-tracked stage over its pool
-    IF v_proj.tracking_type = 'hours'
-       AND v_stage.allocated_hours IS NOT NULL AND v_stage.allocated_hours > 0
-       AND (v_logged + COALESCE(NEW.hours_decimal, 0)) > v_stage.allocated_hours THEN
-      NEW.is_over_budget := true;
+  ELSIF v_proj.tracking_type = 'hours'
+        AND v_stage.allocated_hours IS NOT NULL AND v_stage.allocated_hours > 0 THEN
+    v_logged    := public.stage_logged_hours(NEW.stage_id);  -- prior cumulative (NEW not yet inserted)
+    v_remaining := v_stage.allocated_hours - v_logged;
+    IF v_remaining <= 0 THEN
+      RAISE EXCEPTION 'Stage "%" has used its full hour pool (% h). Contact your line manager for an extension.', v_stage.name, v_stage.allocated_hours;
+    END IF;
+    IF COALESCE(NEW.hours_decimal, 0) > v_remaining THEN
+      RAISE EXCEPTION 'Only % h remain in stage "%". Reduce this entry to % h or request an extension.', round(v_remaining, 2), v_stage.name, round(v_remaining, 2);
     END IF;
   END IF;
 
+  NEW.is_over_budget := false;  -- overflow can no longer be stored under hard caps
   RETURN NEW;
 END;
 $$;
@@ -1288,16 +1287,14 @@ CREATE TRIGGER entries_enforce_stage
   BEFORE INSERT ON public.timesheet_entries
   FOR EACH ROW EXECUTE FUNCTION public.enforce_stage_logging();
 
--- After insert: soft-close an hour stage when its pool is met, and notify
--- project managers of any over-budget entry (who + by how much).
+-- After insert: notify project controllers the first time an hour stage's
+-- pool becomes fully consumed (the entry that tips it to the cap).
 CREATE OR REPLACE FUNCTION public.after_entry_hours_close()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_proj   public.projects%ROWTYPE;
   v_stage  public.project_stages%ROWTYPE;
   v_logged NUMERIC;
-  v_emp    TEXT;
-  v_over   NUMERIC;
 BEGIN
   IF NEW.stage_id IS NULL THEN RETURN NEW; END IF;
   SELECT * INTO v_stage FROM public.project_stages WHERE id = NEW.stage_id;
@@ -1308,21 +1305,16 @@ BEGIN
 
   v_logged := public.stage_logged_hours(NEW.stage_id);
 
-  IF v_logged >= v_stage.allocated_hours AND v_stage.tracking_state = 'active' THEN
+  -- Fire once: when this entry is the one that carries the pool to (or onto) the cap.
+  IF v_logged >= v_stage.allocated_hours
+     AND (v_logged - COALESCE(NEW.hours_decimal, 0)) < v_stage.allocated_hours THEN
     UPDATE public.project_stages
       SET tracking_state = 'soft_closed', soft_closed_at = COALESCE(soft_closed_at, now())
-      WHERE id = v_stage.id;
-  END IF;
-
-  IF NEW.is_over_budget THEN
-    SELECT COALESCE(pr.full_name, pr.email) INTO v_emp
-    FROM public.timesheets t JOIN public.profiles pr ON pr.id = t.employee_id
-    WHERE t.id = NEW.timesheet_id;
-    v_over := round(v_logged - v_stage.allocated_hours, 2);
+      WHERE id = v_stage.id AND tracking_state = 'active';
     INSERT INTO public.notifications (user_id, type, message)
     SELECT id, 'project',
-      v_emp || ' logged over budget on "' || v_proj.name || ' · ' || v_stage.name ||
-      '". Pool ' || v_stage.allocated_hours || 'h, now ' || v_logged || 'h (over by ' || GREATEST(v_over, 0) || 'h).'
+      'Stage "' || v_proj.name || ' · ' || v_stage.name || '" has used its full ' ||
+      v_stage.allocated_hours || 'h pool.'
     FROM public.profiles
     WHERE 'projects_control' = ANY(roles) OR 'it' = ANY(roles);
   END IF;

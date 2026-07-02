@@ -589,8 +589,9 @@ function ImportModal({ existingProjects, onClose, onImported }) {
 // ── Stage Row ────────────────────────────────────────────────────
 const STAGE_STATE = {
   active:      { label: 'Active',      cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
-  soft_closed: { label: 'Soft-closed', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' },
-  hard_locked: { label: 'Locked',      cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
+  not_started: { label: 'Not started', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
+  ended:       { label: 'Ended',       cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' },
+  pool_full:   { label: 'Pool used',   cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
 }
 
 function StageRow({ stage, project, onEditStage, onArchiveStage, readonly }) {

@@ -1,96 +1,74 @@
 import { describe, it, expect } from 'vitest'
-import {
-  stageEffectiveState, canLogToStage, isOverBudget, isStageSelectable, addDaysISO,
-} from './projectRules'
+import { canLogToStage, poolFit, isStageSelectable } from './projectRules'
 
-const NOW = '2026-06-23'
+describe('canLogToStage — date tracked', () => {
+  const stage = { trackingType: 'date', startDate: '2026-06-01', endDate: '2026-06-30' }
 
-describe('stageEffectiveState — date tracked', () => {
-  const base = { trackingType: 'date', endDate: null }
-
-  it('is active with no end date', () => {
-    expect(stageEffectiveState({ ...base }, NOW)).toBe('active')
+  it('accepts an entry inside the window', () => {
+    expect(canLogToStage(stage, '2026-06-15')).toEqual({ ok: true, reason: null, remaining: null })
   })
-  it('is active before the end date', () => {
-    expect(stageEffectiveState({ ...base, endDate: '2026-07-01' }, NOW)).toBe('active')
+  it('accepts an entry on the start and end boundaries', () => {
+    expect(canLogToStage(stage, '2026-06-01').ok).toBe(true)
+    expect(canLogToStage(stage, '2026-06-30').ok).toBe(true)
   })
-  it('soft-closes the day after the end date', () => {
-    expect(stageEffectiveState({ ...base, endDate: '2026-06-22' }, NOW)).toBe('soft_closed')
-  })
-  it('stays soft-closed through the 5-day grace window', () => {
-    expect(stageEffectiveState({ ...base, endDate: '2026-06-18' }, NOW)).toBe('soft_closed') // 5 days prior
-  })
-  it('hard-locks once grace passes (> 5 days)', () => {
-    expect(stageEffectiveState({ ...base, endDate: '2026-06-17' }, NOW)).toBe('hard_locked') // 6 days prior
-  })
-})
-
-describe('stageEffectiveState — hour tracked', () => {
-  const base = { trackingType: 'hours', allocatedHours: 100 }
-
-  it('is active below the pool', () => {
-    expect(stageEffectiveState({ ...base, loggedHours: 80 }, NOW)).toBe('active')
-  })
-  it('soft-closes when the pool is met', () => {
-    expect(stageEffectiveState({ ...base, loggedHours: 100, softClosedAt: '2026-06-22' }, NOW)).toBe('soft_closed')
-  })
-  it('hard-locks once grace passes after closure', () => {
-    expect(stageEffectiveState({ ...base, loggedHours: 120, softClosedAt: '2026-06-10' }, NOW)).toBe('hard_locked')
-  })
-})
-
-describe('canLogToStage — 5-day retroactive rule (date tracked)', () => {
-  // Stage ended 2026-06-22, NOW is 2026-06-23 → soft-closed (grace day 1)
-  const stage = { trackingType: 'date', endDate: '2026-06-22' }
-
-  it('accepts a historical entry within the stage window during grace', () => {
-    expect(canLogToStage(stage, '2026-06-20', NOW)).toEqual({ ok: true, reason: null, grace: true })
-  })
-  it('accepts an entry dated exactly on the closure date', () => {
-    expect(canLogToStage(stage, '2026-06-22', NOW).ok).toBe(true)
-  })
-  it('rejects a future-dated entry on a soft-closed stage', () => {
-    const r = canLogToStage(stage, '2026-06-23', NOW)
+  it('blocks a date before the stage opens (not_started)', () => {
+    const r = canLogToStage(stage, '2026-05-31')
     expect(r.ok).toBe(false)
-    expect(r.reason).toBe('future_on_closed')
+    expect(r.reason).toBe('not_started')
   })
-  it('rejects everything once hard-locked (past grace)', () => {
-    const locked = { trackingType: 'date', endDate: '2026-06-10' } // > 5 days before NOW
-    expect(canLogToStage(locked, '2026-06-09', NOW).ok).toBe(false)
-    expect(canLogToStage(locked, '2026-06-09', NOW).reason).toBe('locked')
+  it('blocks a future-dated entry past the end (ended)', () => {
+    const r = canLogToStage(stage, '2026-07-01')
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('ended')
   })
-  it('accepts freely while active', () => {
-    const active = { trackingType: 'date', endDate: '2026-07-01' }
-    expect(canLogToStage(active, '2026-06-23', NOW).ok).toBe(true)
+  it('still accepts backdated work within the window long after the end', () => {
+    // No grace / hard-lock tail: any date in [start, end] is loggable forever.
+    expect(canLogToStage(stage, '2026-06-10').ok).toBe(true)
   })
 })
 
-describe('isOverBudget — hour pool overrun', () => {
-  const stage = { trackingType: 'hours', allocatedHours: 10, loggedHours: 9 }
-  it('flags when an entry pushes past the pool', () => {
-    expect(isOverBudget(stage, 4)).toBe(true) // 9 + 4 = 13 > 10
+describe('canLogToStage — hour tracked', () => {
+  it('accepts while the pool has room', () => {
+    const r = canLogToStage({ trackingType: 'hours', allocatedHours: 100, loggedHours: 80 }, '2026-06-15')
+    expect(r.ok).toBe(true)
+    expect(r.remaining).toBe(20)
   })
-  it('does not flag when it fits', () => {
-    expect(isOverBudget(stage, 1)).toBe(false) // 9 + 1 = 10
+  it('blocks once the pool is exhausted, for any date (pool_full)', () => {
+    const stage = { trackingType: 'hours', allocatedHours: 100, loggedHours: 100 }
+    const r = canLogToStage(stage, '2026-06-15')
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('pool_full')
+    // Backdating does not bypass an exhausted pool.
+    expect(canLogToStage(stage, '2020-01-01').ok).toBe(false)
   })
-  it('never flags date-tracked stages', () => {
-    expect(isOverBudget({ trackingType: 'date', endDate: '2026-01-01' }, 99)).toBe(false)
+})
+
+describe('poolFit — remaining-pool partial fill', () => {
+  const stage = { trackingType: 'hours', allocatedHours: 10, loggedHours: 5 }
+
+  it('reports overflow when an entry exceeds the remaining pool', () => {
+    const fit = poolFit(stage, 9) // 5 left, 9 requested
+    expect(fit.fits).toBe(false)
+    expect(fit.remaining).toBe(5)
+    expect(fit.overflow).toBe(4)
+  })
+  it('fits when the entry lands exactly on the remaining pool', () => {
+    expect(poolFit(stage, 5).fits).toBe(true)
+  })
+  it('always fits date-tracked stages', () => {
+    expect(poolFit({ trackingType: 'date', endDate: '2026-01-01' }, 99).fits).toBe(true)
   })
 })
 
 describe('isStageSelectable', () => {
-  it('hides hard-locked stages', () => {
-    expect(isStageSelectable({ trackingType: 'date', endDate: '2026-06-01' }, '2026-06-01', NOW)).toBe(false)
+  it('hides a date stage for dates outside its window', () => {
+    const s = { trackingType: 'date', startDate: '2026-06-01', endDate: '2026-06-30' }
+    expect(isStageSelectable(s, '2026-05-01')).toBe(false) // not opened
+    expect(isStageSelectable(s, '2026-06-15')).toBe(true)
+    expect(isStageSelectable(s, '2026-07-15')).toBe(false) // ended
   })
-  it('offers soft-closed date stages for historical dates only', () => {
-    const s = { trackingType: 'date', endDate: '2026-06-22' }
-    expect(isStageSelectable(s, '2026-06-21', NOW)).toBe(true)
-    expect(isStageSelectable(s, '2026-06-25', NOW)).toBe(false)
-  })
-})
-
-describe('addDaysISO', () => {
-  it('adds calendar days across month boundaries', () => {
-    expect(addDaysISO('2026-06-28', 5)).toBe('2026-07-03')
+  it('hides an hour stage whose pool is exhausted', () => {
+    expect(isStageSelectable({ trackingType: 'hours', allocatedHours: 10, loggedHours: 10 }, '2026-06-15')).toBe(false)
+    expect(isStageSelectable({ trackingType: 'hours', allocatedHours: 10, loggedHours: 4 }, '2026-06-15')).toBe(true)
   })
 })

@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { canLogToStage, isOverBudget, isStageSelectable } from '../lib/projectRules'
+import { canLogToStage, poolFit, isStageSelectable } from '../lib/projectRules'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
@@ -152,10 +152,14 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
         return { title: `Stage "${v.stage}" not found in "${v.project}"`, body: 'This stage does not exist for the project. Contact your line manager.' }
       case 'stage_required':
         return { title: `Select a stage for "${v.project}"`, body: 'Logging hours directly to a project isn’t allowed — every entry needs a stage.' }
-      case 'stage_expired':
-        return { title: `Stage "${v.stage}" is outside its window`, body: `The work date falls outside this stage's active dates. Contact your line manager to adjust it.` }
-      case 'stage_locked':
-        return { title: `Stage "${v.stage}" is locked`, body: 'This stage is closed and its 5-day grace period has passed. Contact your line manager.' }
+      case 'stage_not_started':
+        return { title: `Stage "${v.stage}" hasn’t opened yet`, body: `This stage starts on ${v.startDate ?? 'a later date'}. Contact your line manager.` }
+      case 'stage_ended':
+        return { title: `Stage "${v.stage}" has ended`, body: `This stage ended on ${v.endDate ?? 'its end date'}. You can only log work dated on or before that.` }
+      case 'stage_pool_full':
+        return { title: `Stage "${v.stage}" pool is used up`, body: 'The full hour pool for this stage has been logged. Contact your line manager for an extension.' }
+      case 'stage_pool_exceeded':
+        return { title: `Stage "${v.stage}" has only ${v.remaining}h left`, body: `Reduce your hours on this stage to ${v.remaining}h, or contact your line manager for an extension.` }
       default:
         return { title: 'Project issue', body: 'Contact your line manager.' }
     }
@@ -403,35 +407,37 @@ function InAppEntry({ profile, onBack, onSuccess }) {
       trackingType:   proj?.tracking_type,
       allocatedHours: Number(stage.allocated_hours || 0),
       loggedHours:    Number(stage.logged_hours || 0),
+      startDate:      stage.start_date,
       endDate:        stage.end_date,
-      softClosedAt:   stage.soft_closed_at,
     }
   }
 
-  // Blocking issue (locked / outside window). Over-budget is non-blocking.
+  // Blocking issue: stage not open / ended / pool exhausted, or an entry that
+  // would exceed the remaining hour pool (must be reduced or extended).
   function getStageWarning(entry, date) {
     if (!entry.projectId || !entry.stageId || !date) return null
     const proj  = projects.find(p => p.id === entry.projectId)
     const stage = proj?.project_stages?.find(s => s.id === entry.stageId)
     if (!stage) return null
-    const verdict = canLogToStage(ruleStage(stage, proj), date)
-    if (verdict.ok) return null
-    if (verdict.reason === 'locked')
-      return `Stage "${stage.name}" is closed and past its 5-day grace period.`
-    if (verdict.reason === 'future_on_closed')
-      return `Stage "${stage.name}" closed on ${stage.end_date}. You can only log work on or before that date.`
-    return `Stage "${stage.name}" can't be logged for this date.`
-  }
+    const rs = ruleStage(stage, proj)
 
-  // Non-blocking note for hour-pool overruns.
-  function getStageOverrun(entry, date) {
-    if (!entry.projectId || !entry.stageId) return null
-    const proj  = projects.find(p => p.id === entry.projectId)
-    const stage = proj?.project_stages?.find(s => s.id === entry.stageId)
-    if (!stage) return null
+    const verdict = canLogToStage(rs, date)
+    if (!verdict.ok) {
+      if (verdict.reason === 'not_started')
+        return `Stage "${stage.name}" hasn't opened yet — contact your line manager.`
+      if (verdict.reason === 'ended')
+        return `Stage "${stage.name}" ended on ${stage.end_date}. You can only log work dated on or before that.`
+      if (verdict.reason === 'pool_full')
+        return `Stage "${stage.name}" has used its full hour pool — contact your line manager for an extension.`
+      return `Stage "${stage.name}" can't be logged for this date.`
+    }
+
+    // Hours: the entry must fit the remaining pool.
     const hrs = calcHours(entry.timeFrom, entry.timeTo) || 0
-    if (isOverBudget(ruleStage(stage, proj), hrs))
-      return `This will exceed the hour pool for "${stage.name}" — it's allowed but flagged for your manager.`
+    const fit = poolFit(rs, hrs)
+    if (!fit.fits)
+      return `Only ${fit.remaining}h remain in "${stage.name}". Reduce this entry to ${fit.remaining}h or contact your line manager for an extension.`
+
     return null
   }
 
@@ -568,7 +574,6 @@ function InAppEntry({ profile, onBack, onSuccess }) {
                 onUpdateEntry={(entryId, field, value) => updateEntry(de.id, entryId, field, value)}
                 onRemove={() => removeDate(de.id)}
                 getStageWarning={getStageWarning}
-                getOverrun={getStageOverrun}
                 canRemove={dateEntries.length > 1}
               />
             ))}
@@ -608,7 +613,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
   )
 }
 
-function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, getOverrun, canRemove }) {
+function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove }) {
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30">
@@ -641,7 +646,6 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
             onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
             onRemove={() => onRemoveEntry(e.id)}
             getStageWarning={getStageWarning}
-            getOverrun={getOverrun}
           />
         ))}
       </div>
@@ -655,7 +659,7 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
   )
 }
 
-function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning, getOverrun }) {
+function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }) {
   const selectedProject = projects.find(p => p.id === entry.projectId)
   const stages = selectedProject
     ? [...(selectedProject.project_stages || [])]
@@ -664,14 +668,13 @@ function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning, 
           trackingType:   selectedProject.tracking_type,
           allocatedHours: Number(s.allocated_hours || 0),
           loggedHours:    Number(s.logged_hours || 0),
+          startDate:      s.start_date,
           endDate:        s.end_date,
-          softClosedAt:   s.soft_closed_at,
         }, date))
         .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
     : []
   const hours   = calcHours(entry.timeFrom, entry.timeTo)
   const warning = getStageWarning(entry, date)
-  const overrun = getOverrun ? getOverrun(entry, date) : null
 
   return (
     <div className="px-5 py-4 space-y-3">
@@ -709,13 +712,6 @@ function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning, 
         <div className="flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
           <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
           {warning}
-        </div>
-      )}
-      {/* Over-budget note (non-blocking) */}
-      {!warning && overrun && (
-        <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 rounded-lg px-3 py-2">
-          <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
-          {overrun}
         </div>
       )}
 
