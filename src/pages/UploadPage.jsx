@@ -132,10 +132,11 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
   const {
     days, totalDays, totalHours,
     discrepancies = [], hasDiscrepancies = false,
+    missingTasks = [], hasMissingTasks = false,
     projectViolations = [], hasProjectViolations = false,
     leaveViolations = [], hasLeaveViolations = false,
   } = preview
-  const blocked = hasDiscrepancies || hasProjectViolations || hasLeaveViolations
+  const blocked = hasDiscrepancies || hasMissingTasks || hasProjectViolations || hasLeaveViolations
   const [expandedDay, setExpandedDay] = useState(null)
   const isMulti   = totalDays > 1
   const dateRange = isMulti
@@ -216,6 +217,39 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400">
               Fix these in your Excel file and re-upload. Row numbers match the Excel display.
+            </p>
+          </div>
+        )}
+
+        {/* ── Missing task descriptions ────────────────────── */}
+        {hasMissingTasks && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {missingTasks.length} missing task description{missingTasks.length !== 1 ? 's' : ''}
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {missingTasks.map((m, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-800 dark:text-gray-200 truncate">
+                        {m.project} · {format(parseISO(m.date), 'EEE MMM d')}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                        Every entry needs a task description — this one is blank.
+                      </p>
+                    </div>
+                    {m.rowNumber && (
+                      <span className="text-xs font-mono bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 px-2 py-0.5 rounded-md flex-shrink-0 whitespace-nowrap">
+                        Row {m.rowNumber}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Add a description for each entry in your Excel file and re-upload. Row numbers match the Excel display.
             </p>
           </div>
         )}
@@ -454,7 +488,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
     dateEntries.length > 0 &&
     dateEntries.every(de =>
       de.date && de.entries.length > 0 &&
-      de.entries.every(e => e.projectId && e.stageId && e.timeFrom && e.timeTo)
+      de.entries.every(e => e.projectId && e.stageId && e.timeFrom && e.timeTo && e.task?.trim())
     )
 
   async function handleSubmit() {
@@ -526,7 +560,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
         </button>
         <div>
           <h1 className="page-title flex items-center gap-2">
-            In-app entry
+            In-app timesheet entry
             <span className="text-xs font-semibold bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full">Beta</span>
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Add dates and entries directly in the browser.</p>
@@ -740,12 +774,12 @@ function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }
       {/* Task/description + remove button */}
       <div className="flex items-end gap-3">
         <div className="flex-1">
-          <label className="text-xs font-medium text-gray-500 mb-1 block">Task / Description</label>
+          <label className="text-xs font-medium text-gray-500 mb-1 block">Task / Description *</label>
           <input
             type="text"
             value={entry.task}
             onChange={e => onUpdate('task', e.target.value)}
-            placeholder="Optional description"
+            placeholder="Required — what did you work on?"
             className="input text-sm"
           />
         </div>
@@ -940,7 +974,7 @@ function UploadPageInner({ profile }) {
         className="fixed bottom-6 right-6 z-40 flex items-center gap-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-medium px-4 py-2.5 rounded-2xl shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all"
       >
         <PlusCircle size={15} />
-        Upload in-app
+        In-app timesheet entry
         <span className="text-xs font-semibold bg-amber-400 text-amber-900 px-1.5 py-0.5 rounded-full">Beta</span>
       </button>
     </div>

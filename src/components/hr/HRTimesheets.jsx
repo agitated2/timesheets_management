@@ -48,7 +48,7 @@ function EntryTable({ entries }) {
   )
 }
 
-function Row({ label, sub, hours, status, filePath, entries }) {
+function Row({ label, sub, hours, status, reviewerName, filePath, entries }) {
   const [open, setOpen] = useState(false)
   return (
     <div>
@@ -57,14 +57,19 @@ function Row({ label, sub, hours, status, filePath, entries }) {
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium truncate">{label}</p>
           <p className="text-xs text-gray-400 truncate">{sub}</p>
+          {status === 'approved' && (
+            <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate">Approved by {reviewerName || '—'}</p>
+          )}
         </div>
         {status && <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full capitalize hidden sm:inline', statusBadge[status])}>{status}</span>}
         <span className="text-sm font-semibold tabular-nums text-gray-600 dark:text-gray-300 flex-shrink-0">{hours}h</span>
-        {filePath && filePath !== 'inapp' && (
+        {filePath === 'inapp' ? (
+          <span className="text-xs text-gray-400 flex-shrink-0 italic hidden sm:inline" title="Entered directly in the app — no original file">In-app entry</span>
+        ) : filePath ? (
           <span onClick={e => { e.stopPropagation(); downloadFile(filePath) }} className="text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 flex-shrink-0" title="Download original">
             <Download size={15} />
           </span>
-        )}
+        ) : null}
       </button>
       {open && <EntryTable entries={entries} />}
     </div>
@@ -97,8 +102,9 @@ export default function HRTimesheets() {
   const load = useCallback(async () => {
     setLoading(true)
     let q = supabase.from('timesheets')
-      .select(`id, date, total_hours, status, file_path, employee_id,
+      .select(`id, date, total_hours, status, file_path, employee_id, reviewer_id,
                profiles!employee_id(full_name, email),
+               reviewer:profiles!reviewer_id(full_name, email),
                timesheet_entries(id, time_from, time_to, hours_decimal, project_name, task, project_id, stage_id, projects(name), project_stages(name))`)
       .order('date', { ascending: false })
     if (from) q = q.gte('date', from)
@@ -113,9 +119,14 @@ export default function HRTimesheets() {
   useEffect(() => { load() }, [load])
 
   const projectOptions = useMemo(() => projects.map(p => ({ value: p.id, label: p.name })), [projects])
+  // Stages are scoped to the selected project(s). With no project selected the
+  // stage filter is disabled (there is nothing to scope to). All stages of a
+  // selected project are offered — active, finished and archived alike.
   const stageOptions = useMemo(() => {
-    const src = projFilter.length ? projects.filter(p => projFilter.includes(p.id)) : projects
-    return src.flatMap(p => (p.project_stages || []).map(s => ({ value: s.id, label: s.name, sublabel: p.name })))
+    if (!projFilter.length) return []
+    return projects
+      .filter(p => projFilter.includes(p.id))
+      .flatMap(p => (p.project_stages || []).map(s => ({ value: s.id, label: s.name, sublabel: p.name })))
   }, [projects, projFilter])
 
   // Apply project/stage filters client-side (on entries)
@@ -145,6 +156,7 @@ export default function HRTimesheets() {
         sub: format(parseISO(s.date), 'EEE, MMM d, yyyy'),
         hours: (s._entries.reduce((a, e) => a + (e.hours_decimal || 0), 0)).toFixed(2),
         status: s.status,
+        reviewerName: s.reviewer?.full_name || s.reviewer?.email || null,
         filePath: s.file_path,
         entries: s._entries,
       }))
@@ -166,6 +178,7 @@ export default function HRTimesheets() {
           sub: format(parseISO(s.date), 'EEE, MMM d, yyyy'),
           hours: entries.reduce((a, e) => a + (e.hours_decimal || 0), 0).toFixed(2),
           status: s.status,
+          reviewerName: s.reviewer?.full_name || s.reviewer?.email || null,
           filePath: s.file_path,
           entries,
         })
@@ -188,7 +201,7 @@ export default function HRTimesheets() {
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <MultiSelect options={employees.map(e => ({ value: e.id, label: e.full_name || e.email, sublabel: e.email }))} value={empFilter} onChange={setEmpFilter} placeholder="All employees" />
           <MultiSelect options={projectOptions} value={projFilter} onChange={v => { setProjFilter(v); setStageFilter([]); setPage(1) }} placeholder="All projects" />
-          <MultiSelect options={stageOptions} value={stageFilter} onChange={v => { setStageFilter(v); setPage(1) }} placeholder="All stages" />
+          <MultiSelect options={stageOptions} value={stageFilter} onChange={v => { setStageFilter(v); setPage(1) }} disabled={projFilter.length === 0} placeholder={projFilter.length === 0 ? 'Select a project first' : 'All stages'} />
           <div className="flex items-center gap-2">
             <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="input text-sm" />
             <span className="text-gray-400 text-sm">–</span>

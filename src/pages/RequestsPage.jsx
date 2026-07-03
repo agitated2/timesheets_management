@@ -270,7 +270,7 @@ export default function RequestsPage() {
       <div className="flex items-center justify-between gap-3 flex-wrap lg:pr-14">
         <div>
           <h1 className="page-title">Requests</h1>
-          <p className="page-subtitle">Submit and track your requests — leave, WFH and more.</p>
+          <p className="page-subtitle">Submit and track your requests — leave and more.</p>
         </div>
         <button onClick={() => setShowNew(true)} className="btn-primary">
           <Plus size={15} /> New request

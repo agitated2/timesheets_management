@@ -69,7 +69,7 @@ function EmployeeDashboard({ profile }) {
 
       <div className="flex gap-3 flex-wrap">
         <Link to="/upload" className="btn-primary">
-          <Upload size={16} /> Upload today's timesheet
+          <Upload size={16} /> Upload timesheet
         </Link>
         <Link to="/history" className="btn-secondary">
           <Clock size={16} /> View history

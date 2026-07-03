@@ -17,6 +17,7 @@ export default function MultiSelect({
   placeholder = 'Select…',
   limit = 10,
   emptyText = 'No matches',
+  disabled = false,
 }) {
   const [open, setOpen]     = useState(false)
   const [search, setSearch] = useState('')
@@ -45,8 +46,12 @@ export default function MultiSelect({
     <div ref={wrapRef} className="relative">
       <button
         type="button"
+        disabled={disabled}
         onClick={() => setOpen(o => !o)}
-        className="input flex items-center justify-between gap-2 text-left min-h-[38px]"
+        className={clsx(
+          'input flex items-center justify-between gap-2 text-left min-h-[38px]',
+          disabled && 'opacity-50 cursor-not-allowed'
+        )}
       >
         <span className="flex flex-wrap gap-1 items-center min-w-0">
           {selectedOptions.length === 0 ? (
@@ -67,7 +72,7 @@ export default function MultiSelect({
         <ChevronDown size={15} className="text-gray-400 flex-shrink-0" />
       </button>
 
-      {open && (
+      {open && !disabled && (
         <div className="absolute z-30 mt-1 w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg shadow-xl">
           <div className="relative p-2 border-b border-gray-100 dark:border-gray-800">
             <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />

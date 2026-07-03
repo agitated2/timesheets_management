@@ -48,7 +48,7 @@ exports.handler = async (event) => {
     const rows    = XLSX.utils.sheet_to_json(sheet,    { header: 1, defval: '',   raw: true })
     const rawRows = XLSX.utils.sheet_to_json(sheetRaw, { header: 1, defval: null, raw: true })
 
-    const { days, discrepancies } = parseSheetMultiDay(rows, rawRows)
+    const { days, discrepancies, missingTasks } = parseSheetMultiDay(rows, rawRows)
 
     if (days.length === 0) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'No valid dates or time entries found in the uploaded file.' }) }
@@ -74,6 +74,8 @@ exports.handler = async (event) => {
           totalHours: round2(preview.reduce((s, d) => s + d.hours, 0)),
           discrepancies,
           hasDiscrepancies: discrepancies.length > 0,
+          missingTasks,
+          hasMissingTasks: missingTasks.length > 0,
           projectViolations,
           hasProjectViolations: projectViolations.length > 0,
           leaveViolations,
@@ -90,6 +92,18 @@ exports.handler = async (event) => {
         body: JSON.stringify({
           error: `File contains ${discrepancies.length} time discrepanc${discrepancies.length === 1 ? 'y' : 'ies'}. Please fix them before uploading.`,
           discrepancies,
+        }),
+      }
+    }
+
+    // ── Block actual upload if any entry is missing a task/description ──
+    if (missingTasks.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: `${missingTasks.length} entr${missingTasks.length === 1 ? 'y is' : 'ies are'} missing a task description. Add one for each entry before uploading.`,
+          missingTasks,
         }),
       }
     }
@@ -393,15 +407,31 @@ function parseSheetMultiDay(rows, rawRows) {
 
   // 2. Section-based: explicit "Date:" label rows
   const sectionDays = tryParseSectionFormat(rows)
-  if (sectionDays.length > 0) return { days: sectionDays, discrepancies: [] }
+  if (sectionDays.length > 0) return { days: sectionDays, discrepancies: [], missingTasks: collectMissingTasks(sectionDays) }
 
   // 3. Legacy single-day fallback
   const legacy = parseLegacySingleDay(rows)
   if (legacy.date && legacy.entries.length > 0) {
-    return { days: [{ date: legacy.date, entries: legacy.entries }], discrepancies: [] }
+    const days = [{ date: legacy.date, entries: legacy.entries }]
+    return { days, discrepancies: [], missingTasks: collectMissingTasks(days) }
   }
 
-  return { days: [], discrepancies: [] }
+  return { days: [], discrepancies: [], missingTasks: [] }
+}
+
+// Every entry must carry a task/description. For the section/legacy formats the
+// task IS the description column, so an empty `task` is the missing-description
+// signal (these formats don't track Excel row numbers).
+function collectMissingTasks(days) {
+  const out = []
+  for (const day of days) {
+    for (const e of (day.entries || [])) {
+      if (!e.task || !String(e.task).trim()) {
+        out.push({ date: day.date, rowNumber: e.row_number || null, project: e.project_name || '(unknown)' })
+      }
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------
@@ -462,6 +492,7 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
 
   const dayMap        = new Map()
   const discrepancies = []
+  const missingTasks  = []
 
   for (const block of blocks) {
     let currentDate = null
@@ -518,6 +549,11 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
         }
       }
 
+      // Task/description is mandatory for every entry.
+      if (!descStr) {
+        missingTasks.push({ date: currentDate, rowNumber: i + 1, project: projectStr || '(unknown)' })
+      }
+
       if (!dayMap.has(currentDate)) dayMap.set(currentDate, [])
       dayMap.get(currentDate).push({
         time_from:     parsed.from,
@@ -536,7 +572,7 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, entries]) => ({ date, entries }))
 
-  return { days, discrepancies }
+  return { days, discrepancies, missingTasks }
 }
 
 // ---------------------------------------------------------------

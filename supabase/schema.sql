@@ -1241,6 +1241,11 @@ DECLARE
   v_logged    NUMERIC;
   v_remaining NUMERIC;
 BEGIN
+  -- A task description is mandatory for every entry (in-app and Excel alike).
+  IF NEW.task IS NULL OR btrim(NEW.task) = '' THEN
+    RAISE EXCEPTION 'Every timesheet entry must include a task description.';
+  END IF;
+
   -- A stage is required whenever an entry references a project: hours can
   -- never be logged directly to a project (date- or hour-tracked alike).
   IF NEW.stage_id IS NULL THEN

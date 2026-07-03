@@ -130,7 +130,9 @@ function TimesheetRow({ ts }) {
             <Icon size={12} />
             {label}
           </div>
-          {ts.file_path !== 'inapp' && (
+          {ts.file_path === 'inapp' ? (
+            <span className="text-xs text-gray-400 italic hidden sm:inline" title="Entered in the app — no original file">In-app entry</span>
+          ) : (
             <button
               onClick={e => { e.stopPropagation(); downloadFile() }}
               title="Download original file"

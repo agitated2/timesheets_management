@@ -140,9 +140,13 @@ export default function ReviewPage() {
           </p>
         )}
 
-        <button onClick={downloadFile} className="btn-secondary text-sm gap-2">
-          <Download size={15} /> Download original file
-        </button>
+        {ts.file_path === 'inapp' ? (
+          <p className="text-xs text-gray-500 dark:text-gray-400 italic">In-app entry — no original file to download.</p>
+        ) : (
+          <button onClick={downloadFile} className="btn-secondary text-sm gap-2">
+            <Download size={15} /> Download original file
+          </button>
+        )}
       </div>
 
       {/* Entries */}
