@@ -134,9 +134,10 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
     discrepancies = [], hasDiscrepancies = false,
     missingTasks = [], hasMissingTasks = false,
     projectViolations = [], hasProjectViolations = false,
+    disciplineViolations = [], hasDisciplineViolations = false,
     leaveViolations = [], hasLeaveViolations = false,
   } = preview
-  const blocked = hasDiscrepancies || hasMissingTasks || hasProjectViolations || hasLeaveViolations
+  const blocked = hasDiscrepancies || hasMissingTasks || hasProjectViolations || hasDisciplineViolations || hasLeaveViolations
   const [expandedDay, setExpandedDay] = useState(null)
   const isMulti   = totalDays > 1
   const dateRange = isMulti
@@ -286,6 +287,43 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
           </div>
         )}
 
+        {/* ── Discipline issues ────────────────────────────── */}
+        {hasDisciplineViolations && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {disciplineViolations.length} discipline issue{disciplineViolations.length !== 1 ? 's' : ''}
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {disciplineViolations.map((v, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-800 dark:text-gray-200">
+                        {v.type === 'discipline_not_found'
+                          ? `Discipline "${v.discipline}" not found`
+                          : 'Missing discipline'}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                        {v.type === 'discipline_not_found'
+                          ? 'This discipline isn’t registered. Use an existing one or ask HR to add it.'
+                          : 'Every entry must specify a discipline in the Discipline column.'}
+                      </p>
+                    </div>
+                    {v.rowNumbers?.length > 0 && (
+                      <span className="text-xs font-mono bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400 px-2 py-0.5 rounded-md flex-shrink-0 whitespace-nowrap">
+                        Row{v.rowNumbers.length > 1 ? 's' : ''} {v.rowNumbers.join(', ')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Add a valid Discipline for each entry in your Excel file and re-upload.
+            </p>
+          </div>
+        )}
+
         {/* ── Leave conflicts ──────────────────────────────── */}
         {hasLeaveViolations && (
           <div className="space-y-2">
@@ -387,6 +425,7 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
 // ── In-App Entry ─────────────────────────────────────────────────
 function InAppEntry({ profile, onBack, onSuccess }) {
   const [projects, setProjects]       = useState([])
+  const [disciplines, setDisciplines] = useState([])
   const [loadingProjects, setLoading] = useState(true)
   const [dateEntries, setDateEntries] = useState([newDateEntry()])
   const [submitting, setSubmitting]   = useState(false)
@@ -394,6 +433,8 @@ function InAppEntry({ profile, onBack, onSuccess }) {
 
   useEffect(() => {
     async function load() {
+      const { data: disc } = await supabase.from('disciplines').select('id, name').eq('is_active', true).order('name')
+      setDisciplines(disc || [])
       const { data: members } = await supabase
         .from('project_members')
         .select('project_id')
@@ -416,7 +457,8 @@ function InAppEntry({ profile, onBack, onSuccess }) {
     return { id: crypto.randomUUID(), date: format(new Date(), 'yyyy-MM-dd'), entries: [] }
   }
   function newEntry() {
-    return { id: crypto.randomUUID(), projectId: '', stageId: '', timeFrom: '', timeTo: '', task: '' }
+    // Default each entry to the employee's home discipline; they can change it.
+    return { id: crypto.randomUUID(), projectId: '', stageId: '', timeFrom: '', timeTo: '', task: '', disciplineId: profile?.discipline_id || '' }
   }
 
   function addDate() { setDateEntries(prev => [...prev, newDateEntry()]) }
@@ -488,7 +530,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
     dateEntries.length > 0 &&
     dateEntries.every(de =>
       de.date && de.entries.length > 0 &&
-      de.entries.every(e => e.projectId && e.stageId && e.timeFrom && e.timeTo && e.task?.trim())
+      de.entries.every(e => e.projectId && e.stageId && e.timeFrom && e.timeTo && e.task?.trim() && e.disciplineId)
     )
 
   async function handleSubmit() {
@@ -524,6 +566,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
           project_name:  proj?.name  || null,
           project_id:    proj?.id    || null,
           stage_id:      stage?.id   || null,
+          discipline_id: e.disciplineId || null,
           task:          [stage?.name, e.task].filter(Boolean).join(' — ') || null,
         }
       })
@@ -602,6 +645,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
                 key={de.id}
                 de={de}
                 projects={projects}
+                disciplines={disciplines}
                 onDateChange={d => setDate(de.id, d)}
                 onAddEntry={() => addEntry(de.id)}
                 onRemoveEntry={entryId => removeEntry(de.id, entryId)}
@@ -647,7 +691,7 @@ function InAppEntry({ profile, onBack, onSuccess }) {
   )
 }
 
-function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove }) {
+function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove }) {
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30">
@@ -677,6 +721,7 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
             entry={e}
             date={de.date}
             projects={projects}
+            disciplines={disciplines}
             onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
             onRemove={() => onRemoveEntry(e.id)}
             getStageWarning={getStageWarning}
@@ -693,7 +738,7 @@ function DateCard({ de, projects, onDateChange, onAddEntry, onRemoveEntry, onUpd
   )
 }
 
-function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }) {
+function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getStageWarning }) {
   const selectedProject = projects.find(p => p.id === entry.projectId)
   const stages = selectedProject
     ? [...(selectedProject.project_stages || [])]
@@ -737,6 +782,19 @@ function EntryRow({ entry, date, projects, onUpdate, onRemove, getStageWarning }
           >
             <option value="">Select stage…</option>
             {stages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+
+        {/* Discipline */}
+        <div className="col-span-2">
+          <label className="text-xs font-medium text-gray-500 mb-1 block">Discipline *</label>
+          <select
+            value={entry.disciplineId || ''}
+            onChange={e => onUpdate('disciplineId', e.target.value)}
+            className="input text-sm"
+          >
+            <option value="">Select discipline…</option>
+            {disciplines.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
           </select>
         </div>
       </div>

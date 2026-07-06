@@ -62,8 +62,9 @@ exports.handler = async (event) => {
         hours: round2(d.entries.reduce((s, e) => s + (e.hours_decimal || 0), 0)),
         entries: d.entries,
       }))
-      const projectViolations = await checkProjectViolations(supabaseAdmin, user.id, days)
-      const leaveViolations   = await checkLeaveViolations(supabaseAdmin, user.id, days)
+      const projectViolations    = await checkProjectViolations(supabaseAdmin, user.id, days)
+      const disciplineViolations = await checkDisciplineViolations(supabaseAdmin, days)
+      const leaveViolations      = await checkLeaveViolations(supabaseAdmin, user.id, days)
       return {
         statusCode: 200,
         headers,
@@ -78,6 +79,8 @@ exports.handler = async (event) => {
           hasMissingTasks: missingTasks.length > 0,
           projectViolations,
           hasProjectViolations: projectViolations.length > 0,
+          disciplineViolations,
+          hasDisciplineViolations: disciplineViolations.length > 0,
           leaveViolations,
           hasLeaveViolations: leaveViolations.length > 0,
         }),
@@ -117,6 +120,19 @@ exports.handler = async (event) => {
         body: JSON.stringify({
           error: `Timesheet has ${projectViolations.length} project access violation${projectViolations.length === 1 ? '' : 's'}. Please resolve them before uploading.`,
           projectViolations,
+        }),
+      }
+    }
+
+    // ── Block actual upload if any entry is missing / has an unknown discipline ──
+    const disciplineViolations = await checkDisciplineViolations(supabaseAdmin, days)
+    if (disciplineViolations.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: `Timesheet has ${disciplineViolations.length} discipline issue${disciplineViolations.length === 1 ? '' : 's'}. Every entry needs a valid discipline.`,
+          disciplineViolations,
         }),
       }
     }
@@ -162,7 +178,7 @@ exports.handler = async (event) => {
 
       const { error: entryErr } = await supabaseAdmin
         .from('timesheet_entries')
-        .insert(day.entries.map(({ stage_name, row_number, ...e }) => ({ ...e, timesheet_id: timesheet.id })))
+        .insert(day.entries.map(({ stage_name, row_number, discipline_name, ...e }) => ({ ...e, timesheet_id: timesheet.id })))
       if (entryErr) throw new Error(`Entries insert error for ${day.date}: ${entryErr.message}`)
 
       resultDays.push({ date: day.date, timesheet, entries: day.entries, hours: totalHours })
@@ -378,10 +394,14 @@ async function attachProjectStageIds(db, days) {
   const pmap = new Map()
   for (const p of (projects || [])) pmap.set(p.name.toLowerCase(), p)
 
+  const { data: discs } = await db.from('disciplines').select('id, name').eq('is_active', true)
+  const dmap = new Map((discs || []).map(d => [d.name.toLowerCase(), d.id]))
+
   for (const day of days) {
     for (const e of day.entries) {
-      e.project_id = null
-      e.stage_id   = null
+      e.project_id    = null
+      e.stage_id      = null
+      e.discipline_id = e.discipline_name ? (dmap.get(e.discipline_name.toLowerCase()) || null) : null
       if (!e.project_name) continue
       const p = pmap.get(e.project_name.toLowerCase())
       if (!p) continue
@@ -394,6 +414,36 @@ async function attachProjectStageIds(db, days) {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------
+// DISCIPLINE VALIDATION
+// Every entry must name a discipline that matches an active one.
+// ---------------------------------------------------------------
+async function checkDisciplineViolations(db, days) {
+  const { data: discs } = await db.from('disciplines').select('id, name').eq('is_active', true)
+  const byName = new Map((discs || []).map(d => [d.name.toLowerCase(), d.id]))
+
+  const violationMap = new Map()
+  function add(type, name, date, row) {
+    const key = `${type}::${(name || '').toLowerCase()}::${date}`
+    if (violationMap.has(key)) {
+      if (row) violationMap.get(key).rowNumbers.push(row)
+    } else {
+      violationMap.set(key, { type, discipline: name || null, date, rowNumbers: row ? [row] : [] })
+    }
+  }
+
+  for (const day of days) {
+    for (const e of day.entries) {
+      if (!e.discipline_name) {
+        add('discipline_required', null, day.date, e.row_number || null)
+      } else if (!byName.has(e.discipline_name.toLowerCase())) {
+        add('discipline_not_found', e.discipline_name, day.date, e.row_number || null)
+      }
+    }
+  }
+  return [...violationMap.values()]
 }
 
 // ---------------------------------------------------------------
@@ -482,6 +532,7 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
       dateCol:       c + 1,
       projectCol:    findNear('project'),
       stageCol:      findNear('stage'),
+      disciplineCol: findNear('discipline') !== -1 ? findNear('discipline') : findNear('department'),
       totalHoursCol: findNear('total'),
       timeCol,
       descCol:       findNear('description') !== -1 ? findNear('description') : findNear('desc'),
@@ -520,9 +571,10 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
       const parsed = parseTimeRange(timeStr)
       if (!parsed) continue
 
-      const projectStr = block.projectCol !== -1 ? String(row[block.projectCol] || '').trim() : ''
-      const stageStr   = block.stageCol   !== -1 ? String(row[block.stageCol]   || '').trim() : ''
-      const descStr    = block.descCol    !== -1 ? String(row[block.descCol]    || '').trim() : ''
+      const projectStr    = block.projectCol    !== -1 ? String(row[block.projectCol]    || '').trim() : ''
+      const stageStr      = block.stageCol      !== -1 ? String(row[block.stageCol]      || '').trim() : ''
+      const disciplineStr = block.disciplineCol !== -1 ? String(row[block.disciplineCol] || '').trim() : ''
+      const descStr       = block.descCol       !== -1 ? String(row[block.descCol]       || '').trim() : ''
 
       let task = null
       if (stageStr && descStr) task = `${stageStr} — ${descStr}`
@@ -559,9 +611,10 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
         time_from:     parsed.from,
         time_to:       parsed.to,
         hours_decimal: parsed.hours,
-        project_name:  projectStr || null,
-        stage_name:    stageStr   || null,  // validation only, stripped before DB insert
-        row_number:    i + 1,               // Excel row for violation reporting, stripped before DB insert
+        project_name:    projectStr    || null,
+        stage_name:      stageStr      || null,  // validation only, stripped before DB insert
+        discipline_name: disciplineStr || null,  // resolved to discipline_id before insert
+        row_number:      i + 1,                  // Excel row for violation reporting, stripped before DB insert
         task,
       })
     }
@@ -611,9 +664,10 @@ function tryParseSectionFormat(rows) {
 }
 
 function parseSectionEntries(rows) {
-  const TIME_KW    = ['time', 'hours', 'from', 'duration']
-  const PROJECT_KW = ['project', 'work', 'client']
-  const TASK_KW    = ['task', 'description', 'detail', 'activity']
+  const TIME_KW       = ['time', 'hours', 'from', 'duration']
+  const PROJECT_KW    = ['project', 'work', 'client']
+  const TASK_KW       = ['task', 'description', 'detail', 'activity']
+  const DISCIPLINE_KW = ['discipline', 'department']
 
   let headerRowIdx = -1
   for (let i = 0; i < rows.length; i++) {
@@ -624,29 +678,32 @@ function parseSectionEntries(rows) {
   }
   if (headerRowIdx === -1) return []
 
-  const hdrs       = rows[headerRowIdx].map(c => String(c).toLowerCase().trim())
-  const timeIdx    = findColIdx(hdrs, TIME_KW)
-  const projectIdx = findColIdx(hdrs, PROJECT_KW)
-  const taskIdx    = findColIdx(hdrs, TASK_KW)
+  const hdrs          = rows[headerRowIdx].map(c => String(c).toLowerCase().trim())
+  const timeIdx       = findColIdx(hdrs, TIME_KW)
+  const projectIdx    = findColIdx(hdrs, PROJECT_KW)
+  const taskIdx       = findColIdx(hdrs, TASK_KW)
+  const disciplineIdx = findColIdx(hdrs, DISCIPLINE_KW)
 
   const entries = []
   for (let i = headerRowIdx + 1; i < rows.length; i++) {
     const row = rows[i]
     if (!row.some(c => c !== '' && c !== null && c !== undefined)) continue
 
-    const rawTime    = timeIdx    !== -1 ? String(row[timeIdx]    || '').trim() : ''
-    const rawProject = projectIdx !== -1 ? String(row[projectIdx] || '').trim() : ''
-    const rawTask    = taskIdx    !== -1 ? String(row[taskIdx]    || '').trim() : ''
+    const rawTime       = timeIdx       !== -1 ? String(row[timeIdx]       || '').trim() : ''
+    const rawProject    = projectIdx    !== -1 ? String(row[projectIdx]    || '').trim() : ''
+    const rawTask       = taskIdx       !== -1 ? String(row[taskIdx]       || '').trim() : ''
+    const rawDiscipline = disciplineIdx !== -1 ? String(row[disciplineIdx] || '').trim() : ''
 
     if (!rawTime && !rawProject) continue
 
     const parsed = parseTimeRange(rawTime)
     entries.push({
-      time_from:     parsed?.from  ?? null,
-      time_to:       parsed?.to    ?? null,
-      hours_decimal: parsed?.hours ?? null,
-      project_name:  rawProject || null,
-      task:          rawTask    || null,
+      time_from:       parsed?.from  ?? null,
+      time_to:         parsed?.to    ?? null,
+      hours_decimal:   parsed?.hours ?? null,
+      project_name:    rawProject    || null,
+      discipline_name: rawDiscipline || null,
+      task:            rawTask       || null,
     })
   }
   return entries

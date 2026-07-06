@@ -9,7 +9,8 @@ export default function OnboardingPage() {
   const navigate = useNavigate()
 
   const [fullName, setFullName]           = useState(profile?.full_name || '')
-  const [discipline, setDiscipline]       = useState(profile?.discipline || '')
+  const [disciplineId, setDisciplineId]   = useState(profile?.discipline_id || '')
+  const [disciplines, setDisciplines]     = useState([])
   const [managers, setManagers]           = useState([])
   const [managerSearch, setManagerSearch] = useState('')
   const [selectedManager, setSelectedManager] = useState(null)
@@ -23,6 +24,12 @@ export default function OnboardingPage() {
       .filter('roles', 'ov', '{manager,c_suite}')
       .order('full_name')
       .then(({ data }) => setManagers(data ?? []))
+    supabase
+      .from('disciplines')
+      .select('id, name')
+      .eq('is_active', true)
+      .order('name')
+      .then(({ data }) => setDisciplines(data ?? []))
   }, [])
 
   const filteredManagers = managers.filter(m => {
@@ -33,12 +40,13 @@ export default function OnboardingPage() {
   async function handleSubmit(e) {
     e.preventDefault()
     if (!fullName.trim()) { setError('Please enter your full name.'); return }
+    if (!disciplineId) { setError('Please select your discipline.'); return }
     setError('')
     setLoading(true)
 
     const updates = {
       full_name: fullName.trim(),
-      discipline: discipline.trim() || null,
+      discipline_id: disciplineId,
       onboarding_complete: true,
       ...(selectedManager && { manager_id: selectedManager.id, manager_ids: [selectedManager.id] }),
     }
@@ -84,15 +92,18 @@ export default function OnboardingPage() {
             </div>
 
             <div>
-              <label className="label" htmlFor="discipline">Discipline / job title <span className="text-gray-400 font-normal">(optional)</span></label>
-              <input
+              <label className="label" htmlFor="discipline">Discipline</label>
+              <select
                 id="discipline"
-                type="text"
-                value={discipline}
-                onChange={e => setDiscipline(e.target.value)}
+                value={disciplineId}
+                onChange={e => setDisciplineId(e.target.value)}
                 className="input"
-                placeholder="e.g. Structural Engineer, MEP Designer"
-              />
+                required
+              >
+                <option value="" disabled>Select your discipline…</option>
+                {disciplines.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+              <p className="text-xs text-gray-400 mt-1">Your discipline can only be changed later by HR or IT.</p>
             </div>
 
             <div>

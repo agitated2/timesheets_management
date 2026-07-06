@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
-  Users, Search, ChevronDown, ChevronRight, Briefcase, CalendarDays, Check,
+  Users, Search, ChevronDown, ChevronRight, Briefcase, CalendarDays, Check, Layers,
 } from 'lucide-react'
 import Pagination from '../components/Pagination'
 import EmployeeCalendarModal from '../components/EmployeeCalendarModal'
@@ -42,7 +42,33 @@ function AllowanceEditor({ employeeId, category, current, onSaved }) {
   )
 }
 
-function EmployeeRow({ emp, projects, balances, calendarName, categories, canManage, onChanged, onOpenCalendar }) {
+// ── Inline discipline editor for one employee ─────────────────────
+function DisciplineEditor({ employeeId, current, disciplines, onSaved }) {
+  const [saving, setSaving] = useState(false)
+  async function change(value) {
+    setSaving(true)
+    const { error } = await supabase.rpc('set_employee_discipline', {
+      p_employees: [employeeId], p_discipline: value || null,
+    })
+    setSaving(false)
+    if (error) { alert(error.message); return }
+    onSaved()
+  }
+  return (
+    <select
+      value={current || ''} disabled={saving}
+      onChange={e => change(e.target.value)}
+      className="input text-sm w-full py-1 max-w-xs"
+    >
+      <option value="">— Unassigned —</option>
+      {disciplines.map(d => (
+        <option key={d.id} value={d.id}>{d.name}{d.is_active ? '' : ' (inactive)'}</option>
+      ))}
+    </select>
+  )
+}
+
+function EmployeeRow({ emp, projects, balances, calendarName, categories, disciplines, discName, canManage, onChanged, onOpenCalendar }) {
   const [open, setOpen] = useState(false)
   const balByCat = new Map(balances.map(b => [b.category_id, b]))
 
@@ -54,16 +80,25 @@ function EmployeeRow({ emp, projects, balances, calendarName, categories, canMan
           <p className="text-sm font-medium truncate">{emp.full_name || emp.email}</p>
           <p className="text-xs text-gray-400 truncate">{emp.email}</p>
         </div>
+        <span className="hidden lg:flex items-center gap-1 text-xs text-gray-500 max-w-[160px] truncate"><Layers size={12} className="flex-shrink-0" /> {discName || '—'}</span>
         <span className="hidden sm:flex items-center gap-1 text-xs text-gray-500"><Briefcase size={12} /> {projects.length}</span>
         <span className="hidden md:flex items-center gap-1 text-xs text-gray-500"><CalendarDays size={12} /> {calendarName}</span>
       </button>
 
       {open && (
         <div className="bg-gray-50 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800 px-5 py-4 grid md:grid-cols-3 gap-5">
-          <div className="md:col-span-3">
+          <div className="md:col-span-3 flex flex-wrap items-center gap-4">
             <button onClick={() => onOpenCalendar(emp)} className="btn-secondary text-sm">
               <CalendarDays size={14} /> Monthly calendar
             </button>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Discipline</span>
+              {canManage ? (
+                <DisciplineEditor employeeId={emp.id} current={emp.discipline_id} disciplines={disciplines} onSaved={onChanged} />
+              ) : (
+                <span className="text-sm">{discName || '—'}</span>
+              )}
+            </div>
           </div>
           {/* Projects */}
           <div>
@@ -119,23 +154,26 @@ export default function EmployeeOverviewPage() {
   const [calByEmp, setCalByEmp] = useState({})
   const [defaultCal, setDefaultCal] = useState('Company Default')
   const [categories, setCategories] = useState([])
+  const [disciplines, setDisciplines] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [calendarFor, setCalendarFor] = useState(null)
 
   const load = useCallback(async () => {
-    const [profs, members, bals, assigns, cals, cats] = await Promise.all([
-      supabase.from('profiles').select('id, full_name, email').order('full_name'),
+    const [profs, members, bals, assigns, cals, cats, disc] = await Promise.all([
+      supabase.from('profiles').select('id, full_name, email, discipline_id').order('full_name'),
       supabase.from('project_members').select('employee_id, projects(name)'),
       supabase.from('leave_balance_summary').select('*'),
       supabase.from('calendar_assignments').select('employee_id, calendar_id'),
       supabase.from('holiday_calendars').select('id, name, is_default'),
       supabase.from('leave_categories').select('*').eq('is_active', true).order('name'),
+      supabase.from('disciplines').select('id, name, is_active').order('name'),
     ])
 
     setEmployees(profs.data || [])
     setCategories(cats.data || [])
+    setDisciplines(disc.data || [])
 
     const calNameById = new Map((cals.data || []).map(c => [c.id, c.name]))
     const def = (cals.data || []).find(c => c.is_default)
@@ -164,6 +202,8 @@ export default function EmployeeOverviewPage() {
 
   useEffect(() => { load() }, [load])
 
+  const discNameById = useMemo(() => new Map(disciplines.map(d => [d.id, d.name])), [disciplines])
+
   const q = search.trim().toLowerCase()
   const filtered = useMemo(() => employees.filter(e =>
     !q || (e.full_name || '').toLowerCase().includes(q) || (e.email || '').toLowerCase().includes(q)
@@ -189,6 +229,7 @@ export default function EmployeeOverviewPage() {
         <div className="hidden sm:flex items-center gap-3 px-5 py-2.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
           <span className="w-[15px]" />
           <span className="flex-1">Employee</span>
+          <span className="hidden lg:flex items-center gap-1 max-w-[160px]"><Layers size={12} /> Discipline</span>
           <span className="flex items-center gap-1"><Briefcase size={12} /> Projects</span>
           <span className="hidden md:flex items-center gap-1"><CalendarDays size={12} /> Calendar</span>
         </div>
@@ -209,6 +250,8 @@ export default function EmployeeOverviewPage() {
                 balances={balByEmp[emp.id] || []}
                 calendarName={calByEmp[emp.id] || defaultCal}
                 categories={categories}
+                disciplines={disciplines}
+                discName={discNameById.get(emp.discipline_id)}
                 canManage={canManage}
                 onChanged={load}
                 onOpenCalendar={setCalendarFor}

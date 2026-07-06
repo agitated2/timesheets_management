@@ -122,6 +122,8 @@ function MultiSelectDropdown({ options, value, onChange, placeholder }) {
 function ProjectInsights({ dark }) {
   const [projects, setProjects]   = useState([])
   const [projectId, setProjectId] = useState('')
+  const [disciplines, setDisciplines] = useState([])
+  const [deptFilter, setDeptFilter]   = useState([])
   const [stages, setStages]       = useState([])
   const [entries, setEntries]     = useState([])
   const [loading, setLoading]     = useState(false)
@@ -129,6 +131,8 @@ function ProjectInsights({ dark }) {
   useEffect(() => {
     supabase.from('projects').select('id, name, tracking_type, total_hours').order('name')
       .then(({ data }) => { setProjects(data || []); setProjectId(prev => prev || data?.[0]?.id || '') })
+    supabase.from('disciplines').select('id, name').eq('is_active', true).order('name')
+      .then(({ data }) => setDisciplines(data || []))
   }, [])
 
   useEffect(() => {
@@ -137,7 +141,7 @@ function ProjectInsights({ dark }) {
     Promise.all([
       supabase.from('project_stages_view').select('*').eq('project_id', projectId).order('order_index'),
       supabase.from('timesheet_entries')
-        .select('hours_decimal, timesheets!inner(date, status, profiles!employee_id(discipline))')
+        .select('hours_decimal, discipline_id, disciplines(name), timesheets!inner(date, status)')
         .eq('project_id', projectId)
         .in('timesheets.status', ['approved', 'pending']),
     ]).then(([s, e]) => { setStages(s.data || []); setEntries(e.data || []); setLoading(false) })
@@ -145,6 +149,13 @@ function ProjectInsights({ dark }) {
 
   const project = projects.find(p => p.id === projectId)
   const isHours = project?.tracking_type === 'hours'
+
+  // Department (discipline) filter applies to the logged-hours charts.
+  const shownEntries = useMemo(
+    () => deptFilter.length ? entries.filter(e => deptFilter.includes(e.discipline_id)) : entries,
+    [entries, deptFilter]
+  )
+  const deptOptions = useMemo(() => disciplines.map(d => ({ value: d.id, label: d.name })), [disciplines])
 
   // 1. Estimated vs actual per stage
   const estActual = useMemo(() => stages.filter(s => !s.is_archived).map(s => {
@@ -158,33 +169,33 @@ function ProjectInsights({ dark }) {
     }
   }), [stages])
 
-  // 2. Workforce by discipline
+  // 2. Workforce by discipline (per-entry discipline the work was logged under)
   const byDiscipline = useMemo(() => {
     const acc = {}
-    entries.forEach(e => {
-      const d = e.timesheets?.profiles?.discipline || 'Unspecified'
+    shownEntries.forEach(e => {
+      const d = e.disciplines?.name || 'Unspecified'
       acc[d] = (acc[d] || 0) + (Number(e.hours_decimal) || 0)
     })
     return Object.entries(acc).map(([name, hours]) => ({ name, hours: Math.round(hours * 100) / 100 })).sort((a, b) => b.hours - a.hours)
-  }, [entries])
+  }, [shownEntries])
 
   // 3. Burn-down + 14-day forecast
   const { burn, cap, forecast, totalLogged } = useMemo(() => {
     const byDate = {}
-    entries.forEach(e => { const d = e.timesheets?.date; if (d) byDate[d] = (byDate[d] || 0) + (Number(e.hours_decimal) || 0) })
+    shownEntries.forEach(e => { const d = e.timesheets?.date; if (d) byDate[d] = (byDate[d] || 0) + (Number(e.hours_decimal) || 0) })
     const dates = Object.keys(byDate).sort()
     let cum = 0
     const series = dates.map(d => { cum += byDate[d]; return { date: format(parseISO(d), 'MMM d'), cumulative: Math.round(cum * 100) / 100 } })
     const capVal = isHours ? Number(project?.total_hours || 0) : null
     const since = format(subDays(new Date(), 14), 'yyyy-MM-dd')
-    const last14 = entries.filter(e => (e.timesheets?.date || '') >= since).reduce((s, e) => s + (Number(e.hours_decimal) || 0), 0)
+    const last14 = shownEntries.filter(e => (e.timesheets?.date || '') >= since).reduce((s, e) => s + (Number(e.hours_decimal) || 0), 0)
     const rate = last14 / 14
     let fc = null
     if (isHours && capVal && rate > 0 && cum < capVal) {
       fc = format(addDays(new Date(), Math.ceil((capVal - cum) / rate)), 'MMM d, yyyy')
     }
     return { burn: series, cap: capVal, forecast: fc, totalLogged: Math.round(cum * 100) / 100 }
-  }, [entries, isHours, project])
+  }, [shownEntries, isHours, project])
 
   const tip = { contentStyle: { background: dark ? '#1F2937' : '#FFF', border: 'none', borderRadius: 12, fontSize: 12 } }
 
@@ -196,6 +207,10 @@ function ProjectInsights({ dark }) {
           {projects.length === 0 && <option value="">No projects</option>}
           {projects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.tracking_type === 'hours' ? 'hours' : 'dates'})</option>)}
         </select>
+        <label className="text-sm font-medium">Department</label>
+        <div className="min-w-[180px]">
+          <MultiSelectDropdown options={deptOptions} value={deptFilter} onChange={setDeptFilter} placeholder="All departments" />
+        </div>
         {isHours && (
           <span className="text-xs text-gray-500 ml-auto">
             {totalLogged}h logged of {Number(project?.total_hours || 0)}h pool
@@ -288,12 +303,14 @@ export default function AnalyticsPage() {
 
   const [employees, setEmployees] = useState([])
   const [projects,  setProjects]  = useState([])
+  const [departments, setDepartments] = useState([])
   const [allData,   setAllData]   = useState([])
 
   const [startDate,   setStartDate]   = useState(format(subDays(new Date(), 30), 'yyyy-MM-dd'))
   const [endDate,     setEndDate]     = useState(format(new Date(), 'yyyy-MM-dd'))
   const [empFilters,  setEmpFilters]  = useState([])
   const [projFilters, setProjFilters] = useState([])
+  const [deptFilters, setDeptFilters] = useState([])
   const [loading,     setLoading]     = useState(true)
 
   useEffect(() => {
@@ -305,7 +322,8 @@ export default function AnalyticsPage() {
     const { data } = await supabase
       .from('timesheet_entries')
       .select(`
-        id, project_name, task, time_from, time_to, hours_decimal,
+        id, project_name, task, time_from, time_to, hours_decimal, discipline_id,
+        disciplines ( name ),
         timesheets!inner (
           id, date, status, employee_id,
           profiles!employee_id ( id, full_name, email )
@@ -319,13 +337,16 @@ export default function AnalyticsPage() {
       setAllData(data)
       const uniqueEmps = {}
       const uniqueProjs = new Set()
+      const uniqueDepts = {}
       data.forEach(e => {
         const p = e.timesheets?.profiles
         if (p) uniqueEmps[p.id] = p
         if (e.project_name) uniqueProjs.add(e.project_name.trim())
+        if (e.discipline_id && e.disciplines?.name) uniqueDepts[e.discipline_id] = e.disciplines.name
       })
       setEmployees(Object.values(uniqueEmps).sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '')))
       setProjects([...uniqueProjs].sort())
+      setDepartments(Object.entries(uniqueDepts).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)))
     }
     setLoading(false)
   }
@@ -334,9 +355,45 @@ export default function AnalyticsPage() {
     return allData.filter(e => {
       if (empFilters.length > 0 && !empFilters.includes(e.timesheets?.profiles?.id)) return false
       if (projFilters.length > 0 && !projFilters.includes((e.project_name || '').trim())) return false
+      if (deptFilters.length > 0 && !deptFilters.includes(e.discipline_id)) return false
       return true
     })
-  }, [allData, empFilters, projFilters])
+  }, [allData, empFilters, projFilters, deptFilters])
+
+  // Hours grouped by department (discipline the work was logged under)
+  const byDepartment = useMemo(() => {
+    const acc = {}
+    filtered.forEach(e => {
+      const name = e.disciplines?.name || 'Unspecified'
+      acc[name] = (acc[name] || 0) + (e.hours_decimal || 0)
+    })
+    return Object.entries(acc)
+      .map(([name, hours]) => ({ name, hours: Math.round(hours * 100) / 100 }))
+      .sort((a, b) => b.hours - a.hours)
+  }, [filtered])
+
+  // Cost view: per-employee hours split by the discipline each entry was logged
+  // under — surfaces cross-discipline work.
+  const empByDiscipline = useMemo(() => {
+    const acc = {}
+    filtered.forEach(e => {
+      const p = e.timesheets?.profiles
+      const emp = p?.full_name || p?.email || 'Unknown'
+      const disc = e.disciplines?.name || 'Unspecified'
+      acc[emp] ||= { total: 0, byDisc: {} }
+      acc[emp].byDisc[disc] = (acc[emp].byDisc[disc] || 0) + (e.hours_decimal || 0)
+      acc[emp].total += (e.hours_decimal || 0)
+    })
+    return Object.entries(acc)
+      .map(([emp, v]) => ({
+        emp,
+        total: Math.round(v.total * 100) / 100,
+        breakdown: Object.entries(v.byDisc)
+          .map(([name, h]) => ({ name, hours: Math.round(h * 100) / 100 }))
+          .sort((a, b) => b.hours - a.hours),
+      }))
+      .sort((a, b) => b.total - a.total)
+  }, [filtered])
 
   // Hours by project
   const byProject = useMemo(() => {
@@ -430,6 +487,7 @@ export default function AnalyticsPage() {
 
   const empOptions  = employees.map(e => ({ value: e.id,    label: e.full_name || e.email }))
   const projOptions = projects.map(p =>  ({ value: p,       label: p }))
+  const deptOptions = departments.map(d => ({ value: d.id,  label: d.name }))
 
   return (
     <div className="space-y-6">
@@ -487,6 +545,18 @@ export default function AnalyticsPage() {
               value={projFilters}
               onChange={setProjFilters}
               placeholder="All projects"
+            />
+          </div>
+          <div>
+            <label className="label text-xs">
+              Department
+              {deptFilters.length > 0 && <span className="ml-1 text-ae7-red">{deptFilters.length} selected</span>}
+            </label>
+            <MultiSelectDropdown
+              options={deptOptions}
+              value={deptFilters}
+              onChange={setDeptFilters}
+              placeholder="All departments"
             />
           </div>
         </div>
@@ -601,6 +671,63 @@ export default function AnalyticsPage() {
                   />
                 </PieChart>
               </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Hours by department + cross-discipline cost view */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="card p-5">
+              <h2 className="font-semibold text-sm mb-4 flex items-center gap-2">
+                <BarChart2 size={16} className="text-blue-500" /> Hours by department
+              </h2>
+              {byDepartment.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-16">No department data.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={byDepartment.slice(0, 10)} layout="vertical" margin={{ top: 5, right: 10, bottom: 5, left: 80 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 11, fill: axisColor(dark) }} />
+                    <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: axisColor(dark) }} width={76}
+                      tickFormatter={v => v.length > 14 ? v.slice(0, 14) + '…' : v} />
+                    <Tooltip contentStyle={{ background: dark ? '#1F2937' : '#FFF', border: 'none', borderRadius: 12, fontSize: 12 }} formatter={(v) => [v + 'h', 'Hours']} />
+                    <Bar dataKey="hours" radius={[0, 6, 6, 0]}>
+                      {byDepartment.slice(0, 10).map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            <div className="card overflow-hidden">
+              <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-800">
+                <h2 className="font-semibold text-sm">By employee &amp; discipline</h2>
+                <p className="text-xs text-gray-400 mt-0.5">Cross-discipline work per person, for cost optimisation.</p>
+              </div>
+              <div className="divide-y divide-gray-100 dark:divide-gray-800 max-h-[300px] overflow-y-auto">
+                {empByDiscipline.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-8">No data.</p>
+                ) : empByDiscipline.map(row => (
+                  <div key={row.emp} className="px-5 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium truncate">{row.emp}</span>
+                      <span className="text-sm font-bold tabular-nums flex-shrink-0">{row.total}h</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {row.breakdown.map((b, i) => (
+                        <span key={b.name} className={clsx(
+                          'text-xs px-2 py-0.5 rounded-full',
+                          row.breakdown.length > 1
+                            ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400'
+                            : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                        )}>
+                          <span className="w-1.5 h-1.5 rounded-full inline-block mr-1 align-middle" style={{ background: COLORS[i % COLORS.length] }} />
+                          {b.name}: {b.hours}h
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 

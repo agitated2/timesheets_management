@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { FileText, Inbox, Users, Tags, CalendarDays, ShieldAlert } from 'lucide-react'
+import { FileText, Inbox, Users, Tags, CalendarDays, ShieldAlert, Layers } from 'lucide-react'
 import Tabs from '../components/Tabs'
 import HRTimesheets from '../components/hr/HRTimesheets'
 import HRApprovals from '../components/hr/HRApprovals'
 import HREmployeeLeaves from '../components/hr/HREmployeeLeaves'
 import HRPolicies from '../components/hr/HRPolicies'
+import HRDisciplines from '../components/hr/HRDisciplines'
 import HRCalendar from '../components/hr/HRCalendar'
 import HRRevoke from '../components/hr/HRRevoke'
 
@@ -20,6 +21,7 @@ export default function HRPanelPage() {
     if (it || hasRole('hr_view_timesheets') || hasRole('hr_approve_requests') || hasRole('hr_manage_policies'))
       t.push({ key: 'leaves', label: 'Employee Leaves', icon: Users, Comp: HREmployeeLeaves })
     if (it || hasRole('hr_manage_policies')) t.push({ key: 'policies', label: 'Policies', icon: Tags, Comp: HRPolicies })
+    if (it || hasRole('hr_manage_policies')) t.push({ key: 'disciplines', label: 'Disciplines', icon: Layers, Comp: HRDisciplines })
     if (it || hasRole('hr_manage_calendar')) t.push({ key: 'calendar', label: 'Calendar', icon: CalendarDays, Comp: HRCalendar })
     if (it) t.push({ key: 'revoke', label: 'Revoke Leaves', icon: ShieldAlert, Comp: HRRevoke })
     return t

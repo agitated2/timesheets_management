@@ -1102,8 +1102,108 @@ CREATE POLICY "stages_read_analytics" ON public.project_stages
 -- Mirrored by src/lib/projectRules.js and netlify/functions/parse-timesheet.js.
 -- ===============================================================
 
+-- ===============================================================
+-- DISCIPLINES (managed list + per-entry discipline)
+-- Employees pick a discipline once at onboarding; only Policies/IT
+-- may change it thereafter. Every timesheet entry carries a
+-- discipline (defaults to the employee's home discipline but may
+-- differ, for cross-discipline cost analytics).
+-- ===============================================================
+CREATE TABLE IF NOT EXISTS public.disciplines (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT NOT NULL,
+  is_active  BOOLEAN NOT NULL DEFAULT true,
+  created_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_disciplines_name_lower ON public.disciplines(lower(name));
+
+DROP TRIGGER IF EXISTS disciplines_updated_at ON public.disciplines;
+CREATE TRIGGER disciplines_updated_at BEFORE UPDATE ON public.disciplines
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
 ALTER TABLE public.profiles
-  ADD COLUMN IF NOT EXISTS discipline TEXT;   -- professional discipline / job title
+  ADD COLUMN IF NOT EXISTS discipline_id UUID REFERENCES public.disciplines(id) ON DELETE SET NULL;
+ALTER TABLE public.profiles DROP COLUMN IF EXISTS discipline;
+
+ALTER TABLE public.disciplines ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "disciplines_read"   ON public.disciplines;
+DROP POLICY IF EXISTS "disciplines_manage" ON public.disciplines;
+CREATE POLICY "disciplines_read" ON public.disciplines
+  FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "disciplines_manage" ON public.disciplines
+  FOR ALL USING (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
+  WITH CHECK (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'));
+
+-- Set-once for employees; HR/IT may change anytime.
+CREATE OR REPLACE FUNCTION public.guard_discipline_change()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.discipline_id IS DISTINCT FROM OLD.discipline_id THEN
+    IF public.my_has_role('hr_manage_policies') OR public.my_has_role('it') THEN
+      RETURN NEW;
+    END IF;
+    IF OLD.discipline_id IS NOT NULL THEN
+      RAISE EXCEPTION 'Your discipline can only be changed by HR or IT.';
+    END IF;
+    IF auth.uid() <> NEW.id THEN
+      RAISE EXCEPTION 'Not authorized to set this discipline.';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS profiles_guard_discipline ON public.profiles;
+CREATE TRIGGER profiles_guard_discipline BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.guard_discipline_change();
+
+CREATE OR REPLACE FUNCTION public.require_entry_discipline()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.discipline_id IS NULL THEN
+    RAISE EXCEPTION 'Every timesheet entry must have a discipline.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS entries_require_discipline ON public.timesheet_entries;
+CREATE TRIGGER entries_require_discipline BEFORE INSERT ON public.timesheet_entries
+  FOR EACH ROW EXECUTE FUNCTION public.require_entry_discipline();
+
+CREATE OR REPLACE FUNCTION public.upsert_discipline(p_id UUID, p_name TEXT, p_active BOOLEAN)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_id UUID;
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+  IF p_name IS NULL OR btrim(p_name) = '' THEN RAISE EXCEPTION 'Discipline name is required.'; END IF;
+  IF p_id IS NULL THEN
+    INSERT INTO public.disciplines (name, is_active, created_by)
+      VALUES (btrim(p_name), COALESCE(p_active, true), auth.uid())
+      RETURNING id INTO v_id;
+  ELSE
+    UPDATE public.disciplines
+      SET name = btrim(p_name), is_active = COALESCE(p_active, is_active), updated_at = NOW()
+      WHERE id = p_id
+      RETURNING id INTO v_id;
+    IF v_id IS NULL THEN RAISE EXCEPTION 'Discipline not found.'; END IF;
+  END IF;
+  RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_employee_discipline(p_employees UUID[], p_discipline UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+  UPDATE public.profiles SET discipline_id = p_discipline, updated_at = NOW()
+    WHERE id = ANY(p_employees);
+END;
+$$;
 
 ALTER TABLE public.projects
   ADD COLUMN IF NOT EXISTS tracking_type project_tracking_type NOT NULL DEFAULT 'date',
@@ -1117,7 +1217,9 @@ ALTER TABLE public.project_stages
   ADD COLUMN IF NOT EXISTS soft_closed_at  TIMESTAMPTZ;
 
 ALTER TABLE public.timesheet_entries
-  ADD COLUMN IF NOT EXISTS is_over_budget BOOLEAN NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS is_over_budget BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS discipline_id  UUID REFERENCES public.disciplines(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_timesheet_entries_discipline ON public.timesheet_entries(discipline_id);
 
 -- ---------------------------------------------------------------
 -- IMMUTABLE BOUNDARY AUDIT LOG
