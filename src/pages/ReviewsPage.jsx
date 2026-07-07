@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { Hourglass, CheckSquare, XCircle, Search, ArrowRight } from 'lucide-react'
+import { Hourglass, CheckSquare, XCircle, Search, ArrowRight, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
@@ -13,12 +13,42 @@ const statusCfg = {
   rejected: { label: 'Rejected', icon: XCircle,     cls: 'text-red-600 bg-red-50 dark:bg-red-950/30 dark:text-red-400' },
 }
 
+function SortHeader({ label, sortKey, sort, onSort, className }) {
+  const active = sort.key === sortKey
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      className={clsx(
+        'flex items-center gap-1 text-left hover:text-gray-700 dark:hover:text-gray-200 transition-colors',
+        active && 'text-gray-700 dark:text-gray-200',
+        className
+      )}
+    >
+      {label}
+      {active ? (
+        sort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+      ) : (
+        <ChevronsUpDown size={12} className="text-gray-300 dark:text-gray-600" />
+      )}
+    </button>
+  )
+}
+
 export default function ReviewsPage() {
   const { profile } = useAuth()
   const [timesheets, setTimesheets] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('pending')
   const [search, setSearch] = useState('')
+  const [sort, setSort] = useState({ key: 'date', dir: 'desc' })
+
+  function toggleSort(key) {
+    setSort(prev => prev.key === key
+      ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: 'asc' }
+    )
+  }
 
   useEffect(() => {
     load()
@@ -38,6 +68,8 @@ export default function ReviewsPage() {
     setLoading(false)
   }
 
+  const statusOrder = { pending: 0, approved: 1, rejected: 2 }
+
   const shown = timesheets
     .filter(t => filter === 'all' || t.status === filter)
     .filter(t => {
@@ -47,6 +79,27 @@ export default function ReviewsPage() {
         (t.profiles?.full_name || '').toLowerCase().includes(q) ||
         (t.profiles?.email || '').toLowerCase().includes(q)
       )
+    })
+    .sort((a, b) => {
+      let cmp = 0
+      switch (sort.key) {
+        case 'employee': {
+          const an = (a.profiles?.full_name || a.profiles?.email || '').toLowerCase()
+          const bn = (b.profiles?.full_name || b.profiles?.email || '').toLowerCase()
+          cmp = an.localeCompare(bn)
+          break
+        }
+        case 'hours':
+          cmp = (a.total_hours ?? 0) - (b.total_hours ?? 0)
+          break
+        case 'status':
+          cmp = (statusOrder[a.status] ?? 0) - (statusOrder[b.status] ?? 0)
+          break
+        case 'date':
+        default:
+          cmp = new Date(a.date) - new Date(b.date)
+      }
+      return sort.dir === 'asc' ? cmp : -cmp
     })
 
   return (
@@ -97,10 +150,10 @@ export default function ReviewsPage() {
       ) : (
         <div className="card overflow-hidden">
           <div className="hidden sm:grid grid-cols-5 gap-4 px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
-            <span className="col-span-2">Employee</span>
-            <span>Date</span>
-            <span>Hours</span>
-            <span>Status</span>
+            <SortHeader label="Employee" sortKey="employee" sort={sort} onSort={toggleSort} className="col-span-2" />
+            <SortHeader label="Date" sortKey="date" sort={sort} onSort={toggleSort} />
+            <SortHeader label="Hours" sortKey="hours" sort={sort} onSort={toggleSort} />
+            <SortHeader label="Status" sortKey="status" sort={sort} onSort={toggleSort} />
           </div>
           <div className="divide-y divide-gray-100 dark:divide-gray-800">
             {shown.map(t => {
