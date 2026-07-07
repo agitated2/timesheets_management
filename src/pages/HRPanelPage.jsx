@@ -20,7 +20,7 @@ export default function HRPanelPage() {
     if (it || hasRole('hr_approve_requests')) t.push({ key: 'approvals', label: 'Approvals', icon: Inbox, Comp: HRApprovals })
     if (it || hasRole('hr_view_timesheets') || hasRole('hr_approve_requests') || hasRole('hr_manage_policies'))
       t.push({ key: 'leaves', label: 'Employee Leaves', icon: Users, Comp: HREmployeeLeaves })
-    if (it || hasRole('hr_manage_policies')) t.push({ key: 'policies', label: 'Policies', icon: Tags, Comp: HRPolicies })
+    if (it || hasRole('hr_manage_policies')) t.push({ key: 'policies', label: 'Leave Policies', icon: Tags, Comp: HRPolicies })
     if (it || hasRole('hr_manage_policies')) t.push({ key: 'disciplines', label: 'Disciplines', icon: Layers, Comp: HRDisciplines })
     if (it || hasRole('hr_manage_calendar')) t.push({ key: 'calendar', label: 'Calendar', icon: CalendarDays, Comp: HRCalendar })
     if (it) t.push({ key: 'revoke', label: 'Revoke Leaves', icon: ShieldAlert, Comp: HRRevoke })

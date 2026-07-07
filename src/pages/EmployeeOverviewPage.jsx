@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
-  Users, Search, ChevronDown, ChevronRight, Briefcase, CalendarDays, Check, Layers,
+  Users, Search, ChevronDown, ChevronRight, Briefcase, CalendarDays, Check, Layers, Plus, Minus,
 } from 'lucide-react'
 import Pagination from '../components/Pagination'
 import EmployeeCalendarModal from '../components/EmployeeCalendarModal'
@@ -11,32 +11,46 @@ import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
 
-// ── Inline allowance editor for one employee/category ─────────────
-function AllowanceEditor({ employeeId, category, current, onSaved }) {
-  const [value, setValue] = useState(current ?? '')
+// ── Inline increment/decrement editor for one employee/category ───
+// Adjusts the existing balance by a delta — the caller never needs to know
+// the employee's current running total. Absolute corrections still go
+// through the mass "Set allowances" form on the Policies tab.
+function AllowanceEditor({ employeeId, category, onSaved }) {
+  const [delta, setDelta] = useState('')
   const [saving, setSaving] = useState(false)
-  const dirty = String(value) !== String(current ?? '')
+  const n = Number(delta)
+  const canApply = delta !== '' && n > 0 && !saving
 
-  async function save() {
-    if (value === '' ) return
+  async function apply(sign) {
+    if (!canApply) return
     setSaving(true)
-    const { error } = await supabase.rpc('set_leave_balance', {
-      p_employees: [employeeId], p_category: category.id, p_allowance: Number(value),
+    const { error } = await supabase.rpc('adjust_leave_balance', {
+      p_employees: [employeeId], p_category: category.id, p_delta: sign * n,
     })
     setSaving(false)
     if (error) { alert(error.message); return }
+    setDelta('')
     onSaved()
   }
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1">
+      <button
+        onClick={() => apply(-1)} disabled={!canApply} title="Subtract"
+        className="p-1 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-30 disabled:hover:text-gray-400 disabled:hover:bg-transparent transition-colors"
+      >
+        <Minus size={13} />
+      </button>
       <input
-        type="number" min="0" step="0.5" value={value}
-        onChange={e => setValue(e.target.value)}
-        className="input text-sm w-20 py-1"
+        type="number" min="0" step="0.5" value={delta}
+        onChange={e => setDelta(e.target.value)}
+        placeholder="0" className="input text-sm w-14 py-1 text-center"
       />
-      <button onClick={save} disabled={!dirty || saving} className="btn-primary text-xs px-2 py-1">
-        <Check size={12} />
+      <button
+        onClick={() => apply(1)} disabled={!canApply} title="Add"
+        className="p-1 rounded-md text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 disabled:opacity-30 disabled:hover:text-gray-400 disabled:hover:bg-transparent transition-colors"
+      >
+        <Plus size={13} />
       </button>
     </div>
   )
@@ -122,11 +136,16 @@ function EmployeeRow({ emp, projects, balances, calendarName, categories, discip
                   <div key={c.id} className="flex items-center justify-between gap-3 text-sm">
                     <span className="min-w-0 truncate">{c.name}</span>
                     <div className="flex items-center gap-3 flex-shrink-0">
-                      <span className="text-gray-500 tabular-nums">
-                        {b ? `${Number(b.remaining)} left / ${Number(b.allowance)}` : '—'}
-                      </span>
+                      {b ? (
+                        <span className="text-xs text-right leading-tight">
+                          <span className="block text-gray-700 dark:text-gray-300 tabular-nums font-medium">{Number(b.remaining)} available</span>
+                          <span className="block text-gray-400 tabular-nums">{Number(b.used)} taken · {Number(b.allowance)} total</span>
+                        </span>
+                      ) : (
+                        <span className="text-gray-500 text-xs">—</span>
+                      )}
                       {canManage && (
-                        <AllowanceEditor employeeId={emp.id} category={c} current={b ? Number(b.allowance) : ''} onSaved={onChanged} />
+                        <AllowanceEditor employeeId={emp.id} category={c} onSaved={onChanged} />
                       )}
                     </div>
                   </div>

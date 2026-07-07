@@ -18,10 +18,12 @@ export default function HRPolicies() {
 
   // balance assignment
   const [balCat, setBalCat]     = useState('')
+  const [balMode, setBalMode]   = useState('set')   // 'set' | 'add' | 'subtract'
   const [balEmps, setBalEmps]   = useState([])
   const [balAmount, setBalAmount] = useState('')
   const [savingBal, setSavingBal] = useState(false)
   const [balMsg, setBalMsg]     = useState('')
+  const [balOk, setBalOk]       = useState(true)
 
   const load = useCallback(async () => {
     const [cats, profs] = await Promise.all([
@@ -61,12 +63,15 @@ export default function HRPolicies() {
     setBalMsg('')
     if (!balCat || balEmps.length === 0 || balAmount === '') return
     setSavingBal(true)
-    const { error } = await supabase.rpc('set_leave_balance', {
-      p_employees: balEmps, p_category: balCat, p_allowance: Number(balAmount),
-    })
+    const amount = Number(balAmount)
+    const { error } = balMode === 'set'
+      ? await supabase.rpc('set_leave_balance', { p_employees: balEmps, p_category: balCat, p_allowance: amount })
+      : await supabase.rpc('adjust_leave_balance', { p_employees: balEmps, p_category: balCat, p_delta: balMode === 'add' ? amount : -amount })
     setSavingBal(false)
-    if (error) { setBalMsg(error.message); return }
-    setBalMsg(`Allowance set for ${balEmps.length} employee${balEmps.length === 1 ? '' : 's'}.`)
+    if (error) { setBalOk(false); setBalMsg(error.message); return }
+    const verb = balMode === 'set' ? 'set' : balMode === 'add' ? 'increased' : 'decreased'
+    setBalOk(true)
+    setBalMsg(`Allowance ${verb} for ${balEmps.length} employee${balEmps.length === 1 ? '' : 's'}.`)
     setBalEmps([]); setBalAmount('')
   }
 
@@ -126,7 +131,7 @@ export default function HRPolicies() {
       <div className="card h-fit">
         <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Set allowances</h2>
-          <p className="text-xs text-gray-400 mt-0.5">Apply a balance (in days) to one or more employees.</p>
+          <p className="text-xs text-gray-400 mt-0.5">Set, add to, or subtract from the balance (in days) for one or more employees.</p>
         </div>
         <form onSubmit={saveBalance} className="p-5 space-y-4">
           <div>
@@ -137,16 +142,44 @@ export default function HRPolicies() {
             <p className="text-xs text-gray-400 mt-1">Only paid categories track balances.</p>
           </div>
           <div>
-            <label className="label">Employees</label>
-            <MultiSelect options={employeeOptions} value={balEmps} onChange={setBalEmps} placeholder="Select employees…" />
+            <label className="label">Mode</label>
+            <div className="flex gap-1.5">
+              {[['set', 'Set to'], ['add', 'Add'], ['subtract', 'Subtract']].map(([m, lbl]) => (
+                <button
+                  key={m} type="button" onClick={() => setBalMode(m)}
+                  className={clsx(
+                    'flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors',
+                    balMode === m
+                      ? 'bg-ae7-red text-white'
+                      : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
+                  )}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            {balMode !== 'set' && (
+              <p className="text-xs text-gray-400 mt-1">
+                Applies against each employee's current balance individually — no need to know their running total.
+              </p>
+            )}
           </div>
           <div>
-            <label className="label">Allowance (days)</label>
+            <label className="label">Employees</label>
+            <MultiSelect options={employeeOptions} value={balEmps} onChange={setBalEmps} placeholder="Select employees…" showSelectAll />
+          </div>
+          <div>
+            <label className="label">
+              {balMode === 'set' ? 'Set allowance to (days)' : balMode === 'add' ? 'Add (days)' : 'Subtract (days)'}
+            </label>
             <input type="number" min="0" step="0.5" value={balAmount} onChange={e => setBalAmount(e.target.value)} className="input text-sm" placeholder="e.g. 21" required />
           </div>
-          {balMsg && <p className={clsx('text-xs', balMsg.includes('set for') ? 'text-emerald-600' : 'text-red-500')}>{balMsg}</p>}
+          {balMsg && <p className={clsx('text-xs', balOk ? 'text-emerald-600' : 'text-red-500')}>{balMsg}</p>}
           <button type="submit" disabled={savingBal || !balCat || balEmps.length === 0 || balAmount === ''} className="btn-primary w-full text-sm">
-            {savingBal ? 'Saving…' : <><Check size={14} /> Apply allowance</>}
+            {savingBal
+              ? 'Saving…'
+              : <><Check size={14} /> {balMode === 'set' ? 'Set allowance' : balMode === 'add' ? 'Add to allowance' : 'Subtract from allowance'}</>
+            }
           </button>
         </form>
       </div>

@@ -913,6 +913,7 @@ END;
 $$;
 
 -- HR sets / updates the allowance for one or many employees at once.
+-- Overwrites the absolute total — use for corrections or initial grants.
 CREATE OR REPLACE FUNCTION public.set_leave_balance(
   p_employees UUID[], p_category UUID, p_allowance NUMERIC
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -924,6 +925,26 @@ BEGIN
   SELECT unnest(p_employees), p_category, p_allowance
   ON CONFLICT (employee_id, category_id)
   DO UPDATE SET allowance = EXCLUDED.allowance, updated_at = NOW();
+END;
+$$;
+
+-- HR adds to / subtracts from the existing allowance for one or many employees
+-- at once (e.g. "+20 annual days" without needing to know anyone's running
+-- total). The addition happens in SQL against the stored row, not a value
+-- read back into the client, so concurrent adjustments can't clobber each
+-- other. Clamped at 0 — a subtraction can never drive a balance negative.
+-- This is the seam a future accrual/rollover engine would also write through.
+CREATE OR REPLACE FUNCTION public.adjust_leave_balance(
+  p_employees UUID[], p_category UUID, p_delta NUMERIC
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+  INSERT INTO public.leave_balances (employee_id, category_id, allowance)
+  SELECT unnest(p_employees), p_category, GREATEST(0, p_delta)
+  ON CONFLICT (employee_id, category_id)
+  DO UPDATE SET allowance = GREATEST(0, public.leave_balances.allowance + p_delta), updated_at = NOW();
 END;
 $$;
 

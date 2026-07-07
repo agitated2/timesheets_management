@@ -200,7 +200,7 @@ export default function HRCalendar() {
             </div>
             <form onSubmit={assign} className="flex flex-col sm:flex-row gap-2">
               <div className="flex-1">
-                <MultiSelect options={employeeOptions} value={assignEmps} onChange={setAssignEmps} placeholder="Select employees…" />
+                <MultiSelect options={employeeOptions} value={assignEmps} onChange={setAssignEmps} placeholder="Select employees…" showSelectAll />
               </div>
               <button type="submit" disabled={assignEmps.length === 0} className="btn-primary text-sm flex-shrink-0">
                 <Check size={14} /> Assign to {selected.name}

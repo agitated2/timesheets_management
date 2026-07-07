@@ -18,6 +18,7 @@ export default function MultiSelect({
   limit = 10,
   emptyText = 'No matches',
   disabled = false,
+  showSelectAll = false,
 }) {
   const [open, setOpen]     = useState(false)
   const [search, setSearch] = useState('')
@@ -41,6 +42,11 @@ export default function MultiSelect({
   }
 
   const selectedOptions = options.filter(o => selectedSet.has(o.value))
+  const allSelected = options.length > 0 && options.every(o => selectedSet.has(o.value))
+
+  function toggleSelectAll() {
+    onChange(allSelected ? [] : options.map(o => o.value))
+  }
 
   return (
     <div ref={wrapRef} className="relative">
@@ -84,6 +90,21 @@ export default function MultiSelect({
               className="w-full pl-8 pr-2 py-1.5 text-sm bg-transparent outline-none"
             />
           </div>
+          {showSelectAll && options.length > 0 && (
+            <button
+              type="button"
+              onClick={toggleSelectAll}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800"
+            >
+              <span className={clsx(
+                'w-4 h-4 rounded border flex items-center justify-center flex-shrink-0',
+                allSelected ? 'bg-ae7-red border-ae7-red' : 'border-gray-300 dark:border-gray-600'
+              )}>
+                {allSelected && <Check size={11} className="text-white" />}
+              </span>
+              {allSelected ? 'Deselect all' : `Select all (${options.length})`}
+            </button>
+          )}
           <div className="max-h-60 overflow-y-auto py-1">
             {shown.length === 0 ? (
               <p className="text-xs text-gray-400 text-center py-4">{emptyText}</p>
