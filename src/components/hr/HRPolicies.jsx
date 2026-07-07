@@ -123,7 +123,7 @@ export default function HRPolicies() {
       </div>
 
       {/* Balances */}
-      <div className="card overflow-hidden h-fit">
+      <div className="card h-fit">
         <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Set allowances</h2>
           <p className="text-xs text-gray-400 mt-0.5">Apply a balance (in days) to one or more employees.</p>

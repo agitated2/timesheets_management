@@ -147,7 +147,7 @@ export default function HRDisciplines() {
       </div>
 
       {/* Assign to employees */}
-      <div className="card overflow-hidden h-fit">
+      <div className="card h-fit">
         <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Assign discipline</h2>
           <p className="text-xs text-gray-400 mt-0.5">Set the home discipline for one or more employees.</p>
