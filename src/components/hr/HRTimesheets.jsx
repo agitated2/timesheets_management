@@ -14,8 +14,9 @@ const statusBadge = {
   rejected: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 }
 
-function entryProjectName(e) { return e.projects?.name || e.project_name || '—' }
-function entryStageName(e)   { return e.project_stages?.name || null }
+function entryProjectName(e)    { return e.projects?.name || e.project_name || '—' }
+function entryStageName(e)      { return e.project_stages?.name || null }
+function entryDisciplineName(e) { return e.disciplines?.name || null }
 
 async function downloadFile(filePath) {
   if (!filePath || filePath === 'inapp') { alert('No original file for in-app entries.'); return }
@@ -30,16 +31,17 @@ async function downloadFile(filePath) {
 function EntryTable({ entries }) {
   return (
     <div className="bg-gray-50 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800">
-      <div className="hidden sm:grid grid-cols-5 gap-3 px-5 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-        <span>Time</span><span>Hours</span><span>Project</span><span>Stage</span><span>Task</span>
+      <div className="hidden sm:grid grid-cols-6 gap-3 px-5 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+        <span>Time</span><span>Hours</span><span>Project</span><span>Stage</span><span>Discipline</span><span>Task</span>
       </div>
       <div className="divide-y divide-gray-100 dark:divide-gray-800/60">
         {entries.map((e, i) => (
-          <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-5 gap-2 px-5 py-2.5 text-sm">
+          <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-6 gap-2 px-5 py-2.5 text-sm">
             <span className="font-mono text-xs text-gray-500">{e.time_from ?? '—'}–{e.time_to ?? '—'}</span>
             <span className="font-semibold tabular-nums">{e.hours_decimal != null ? `${e.hours_decimal}h` : '—'}</span>
             <span className="font-medium truncate">{entryProjectName(e)}</span>
             <span className="text-gray-500 truncate">{entryStageName(e) || '—'}</span>
+            <span className="text-gray-500 truncate">{entryDisciplineName(e) || '—'}</span>
             <span className="text-gray-400 truncate">{e.task || '—'}</span>
           </div>
         ))}
@@ -105,7 +107,7 @@ export default function HRTimesheets() {
       .select(`id, date, total_hours, status, file_path, employee_id, reviewer_id,
                profiles!employee_id(full_name, email),
                reviewer:profiles!reviewer_id(full_name, email),
-               timesheet_entries(id, time_from, time_to, hours_decimal, project_name, task, project_id, stage_id, projects(name), project_stages(name))`)
+               timesheet_entries(id, time_from, time_to, hours_decimal, project_name, task, project_id, stage_id, discipline_id, projects(name), project_stages(name), disciplines(name))`)
       .order('date', { ascending: false })
     if (from) q = q.gte('date', from)
     if (to)   q = q.lte('date', to)

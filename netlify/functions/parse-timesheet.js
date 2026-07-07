@@ -576,10 +576,8 @@ function tryParseWeeklyTableFormat(rows, rawRows) {
       const disciplineStr = block.disciplineCol !== -1 ? String(row[block.disciplineCol] || '').trim() : ''
       const descStr       = block.descCol       !== -1 ? String(row[block.descCol]       || '').trim() : ''
 
-      let task = null
-      if (stageStr && descStr) task = `${stageStr} — ${descStr}`
-      else if (stageStr)       task = stageStr
-      else if (descStr)        task = descStr
+      // Stage is stored separately (stage_id); task holds the description only.
+      const task = descStr || null
 
       // ── Discrepancy check ─────────────────────────────────────
       // Total Hours may be stored as a fractional-day serial (e.g. 0.0833 = 2 h)

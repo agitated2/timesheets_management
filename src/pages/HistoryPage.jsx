@@ -83,7 +83,7 @@ function TimesheetRow({ ts }) {
     if (entries) return
     const { data } = await supabase
       .from('timesheet_entries')
-      .select('*')
+      .select('*, disciplines(name), project_stages(name)')
       .eq('timesheet_id', ts.id)
       .order('time_from')
     setEntries(data ?? [])
@@ -153,17 +153,21 @@ function TimesheetRow({ ts }) {
             <p className="text-sm text-gray-400 text-center py-2">No parsed entries</p>
           ) : (
             <div className="space-y-2">
-              <div className="grid grid-cols-3 gap-2 text-xs font-semibold text-gray-400 uppercase tracking-wider px-1">
+              <div className="grid grid-cols-5 gap-2 text-xs font-semibold text-gray-400 uppercase tracking-wider px-1">
                 <span>Time</span>
                 <span>Project</span>
+                <span>Stage</span>
+                <span>Discipline</span>
                 <span>Task</span>
               </div>
               {entries.map(e => (
-                <div key={e.id} className="grid grid-cols-3 gap-2 text-sm bg-white dark:bg-gray-900 rounded-xl px-3 py-2.5 border border-gray-100 dark:border-gray-800">
+                <div key={e.id} className="grid grid-cols-5 gap-2 text-sm bg-white dark:bg-gray-900 rounded-xl px-3 py-2.5 border border-gray-100 dark:border-gray-800">
                   <span className="text-gray-500 text-xs font-mono">
                     {e.time_from ?? '—'} – {e.time_to ?? '—'}{e.hours_decimal ? ` (${e.hours_decimal}h)` : ''}
                   </span>
                   <span className="font-medium truncate">{e.project_name || '—'}</span>
+                  <span className="text-gray-500 truncate">{e.project_stages?.name || '—'}</span>
+                  <span className="text-gray-500 truncate">{e.disciplines?.name || '—'}</span>
                   <span className="text-gray-500 truncate">{e.task || '—'}</span>
                 </div>
               ))}

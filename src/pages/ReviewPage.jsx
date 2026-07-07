@@ -28,7 +28,7 @@ export default function ReviewPage() {
     async function load() {
       const [{ data: sheet }, { data: ents }] = await Promise.all([
         supabase.from('timesheets').select('*, profiles!employee_id(*), reviewer:profiles!reviewer_id(full_name, email)').eq('id', id).single(),
-        supabase.from('timesheet_entries').select('*').eq('timesheet_id', id).order('time_from'),
+        supabase.from('timesheet_entries').select('*, disciplines(name), project_stages(name)').eq('timesheet_id', id).order('time_from'),
       ])
       if (sheet) { setTs(sheet); setEmployee(sheet.profiles) }
       if (ents) setEntries(ents)
@@ -158,18 +158,22 @@ export default function ReviewPage() {
           <p className="text-sm text-gray-400 text-center py-8">No entries parsed</p>
         ) : (
           <>
-            <div className="hidden sm:grid grid-cols-4 gap-3 px-5 py-2.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
+            <div className="hidden sm:grid grid-cols-6 gap-3 px-5 py-2.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
               <span>Time window</span>
               <span>Hours</span>
               <span>Project</span>
+              <span>Stage</span>
+              <span>Discipline</span>
               <span>Task</span>
             </div>
             <div className="divide-y divide-gray-100 dark:divide-gray-800">
               {entries.map((e, i) => (
-                <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-4 gap-2 px-5 py-3.5 text-sm">
+                <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-6 gap-2 px-5 py-3.5 text-sm">
                   <span className="font-mono text-xs text-gray-500">{e.time_from ?? '—'} – {e.time_to ?? '—'}</span>
                   <span className="font-semibold text-blue-600 dark:text-blue-400">{e.hours_decimal != null ? `${e.hours_decimal}h` : '—'}</span>
                   <span className="font-medium">{e.project_name || '—'}</span>
+                  <span className="text-gray-500">{e.project_stages?.name || '—'}</span>
+                  <span className="text-gray-500">{e.disciplines?.name || '—'}</span>
                   <span className="text-gray-400">{e.task || '—'}</span>
                 </div>
               ))}

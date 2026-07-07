@@ -104,6 +104,7 @@ function SuccessScreen({ result, onReset, navigate }) {
                       <div key={i} className="flex items-center justify-between px-4 py-2.5 text-sm">
                         <div className="min-w-0">
                           <span className="font-medium">{e.project_name || '—'}</span>
+                          {e.stage_name && <span className="text-gray-500 ml-2 text-xs">· {e.stage_name}</span>}
                           {e.task && <span className="text-gray-400 ml-2 text-xs">· {e.task}</span>}
                         </div>
                         <span className="text-gray-400 text-xs flex-shrink-0 ml-3">
@@ -379,6 +380,8 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
                           <div key={i} className="flex items-center justify-between px-4 py-2.5 text-sm">
                             <div className="min-w-0">
                               <span className="font-medium">{e.project_name || '—'}</span>
+                              {e.stage_name && <span className="text-gray-500 ml-2 text-xs">· {e.stage_name}</span>}
+                              {e.discipline_name && <span className="text-gray-500 ml-2 text-xs">· {e.discipline_name}</span>}
                               {e.task && <span className="text-gray-400 ml-2 text-xs">· {e.task}</span>}
                             </div>
                             <span className="text-gray-400 text-xs flex-shrink-0 ml-3">
@@ -566,12 +569,15 @@ function InAppEntry({ profile, onBack, onSuccess }) {
           project_name:  proj?.name  || null,
           project_id:    proj?.id    || null,
           stage_id:      stage?.id   || null,
+          stage_name:    stage?.name || null,   // display only — stripped before insert
           discipline_id: e.disciplineId || null,
-          task:          [stage?.name, e.task].filter(Boolean).join(' — ') || null,
+          task:          e.task?.trim() || null,
         }
       })
 
-      const { error: entErr } = await supabase.from('timesheet_entries').insert(entries)
+      const { error: entErr } = await supabase
+        .from('timesheet_entries')
+        .insert(entries.map(({ stage_name, ...e }) => e))
       if (entErr) {
         // Roll back the just-created timesheet so a leave-blocked entry
         // (or any failure) never leaves an empty timesheet behind.

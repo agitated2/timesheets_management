@@ -322,8 +322,9 @@ export default function AnalyticsPage() {
     const { data } = await supabase
       .from('timesheet_entries')
       .select(`
-        id, project_name, task, time_from, time_to, hours_decimal, discipline_id,
+        id, project_name, task, time_from, time_to, hours_decimal, discipline_id, stage_id,
         disciplines ( name ),
+        project_stages ( name ),
         timesheets!inner (
           id, date, status, employee_id,
           profiles!employee_id ( id, full_name, email )
@@ -462,13 +463,15 @@ export default function AnalyticsPage() {
   const totalMissed = Object.values(missedDays).reduce((s, v) => s + v, 0)
 
   function downloadCSV() {
-    const rows = [['Employee', 'Date', 'Project', 'Task', 'Time From', 'Time To', 'Hours']]
+    const rows = [['Employee', 'Date', 'Project', 'Stage', 'Discipline', 'Task', 'Time From', 'Time To', 'Hours']]
     filtered.forEach(e => {
       const p = e.timesheets?.profiles
       rows.push([
         p?.full_name || p?.email || '',
         e.timesheets?.date || '',
         e.project_name || '',
+        e.project_stages?.name || '',
+        e.disciplines?.name || '',
         e.task || '',
         e.time_from || '',
         e.time_to || '',
