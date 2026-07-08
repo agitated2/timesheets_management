@@ -17,6 +17,7 @@ const statusBadge = {
 function entryProjectName(e)    { return e.projects?.name || e.project_name || '—' }
 function entryStageName(e)      { return e.project_stages?.name || null }
 function entryDisciplineName(e) { return e.disciplines?.name || null }
+function formatStamp(iso)       { return format(new Date(iso), 'MMM d, yyyy h:mm a') }
 
 async function downloadFile(filePath) {
   if (!filePath || filePath === 'inapp') { alert('No original file for in-app entries.'); return }
@@ -50,7 +51,7 @@ function EntryTable({ entries }) {
   )
 }
 
-function Row({ label, sub, hours, status, reviewerName, filePath, entries }) {
+function Row({ label, sub, hours, status, reviewerName, submittedAt, decidedAt, filePath, entries }) {
   const [open, setOpen] = useState(false)
   return (
     <div>
@@ -59,8 +60,18 @@ function Row({ label, sub, hours, status, reviewerName, filePath, entries }) {
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium truncate">{label}</p>
           <p className="text-xs text-gray-400 truncate">{sub}</p>
+          {submittedAt && (
+            <p className="text-xs text-gray-400 truncate">Submitted {formatStamp(submittedAt)}</p>
+          )}
           {status === 'approved' && (
-            <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate">Approved by {reviewerName || '—'}</p>
+            <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate">
+              Approved by {reviewerName || '—'}{decidedAt && ` · ${formatStamp(decidedAt)}`}
+            </p>
+          )}
+          {status === 'rejected' && (
+            <p className="text-xs text-red-500 dark:text-red-400 truncate">
+              Rejected by {reviewerName || '—'}{decidedAt && ` · ${formatStamp(decidedAt)}`}
+            </p>
           )}
         </div>
         {status && <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full capitalize hidden sm:inline', statusBadge[status])}>{status}</span>}
@@ -104,7 +115,7 @@ export default function HRTimesheets() {
   const load = useCallback(async () => {
     setLoading(true)
     let q = supabase.from('timesheets')
-      .select(`id, date, total_hours, status, file_path, employee_id, reviewer_id,
+      .select(`id, date, total_hours, status, file_path, employee_id, reviewer_id, created_at, updated_at,
                profiles!employee_id(full_name, email),
                reviewer:profiles!reviewer_id(full_name, email),
                timesheet_entries(id, time_from, time_to, hours_decimal, project_name, task, project_id, stage_id, discipline_id, projects(name), project_stages(name), disciplines(name))`)
@@ -159,6 +170,8 @@ export default function HRTimesheets() {
         hours: (s._entries.reduce((a, e) => a + (e.hours_decimal || 0), 0)).toFixed(2),
         status: s.status,
         reviewerName: s.reviewer?.full_name || s.reviewer?.email || null,
+        submittedAt: s.created_at,
+        decidedAt: s.status !== 'pending' ? s.updated_at : null,
         filePath: s.file_path,
         entries: s._entries,
       }))
@@ -181,6 +194,8 @@ export default function HRTimesheets() {
           hours: entries.reduce((a, e) => a + (e.hours_decimal || 0), 0).toFixed(2),
           status: s.status,
           reviewerName: s.reviewer?.full_name || s.reviewer?.email || null,
+          submittedAt: s.created_at,
+          decidedAt: s.status !== 'pending' ? s.updated_at : null,
           filePath: s.file_path,
           entries,
         })

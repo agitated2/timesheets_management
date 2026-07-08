@@ -13,6 +13,8 @@ const statusCfg = {
   rejected: { label: 'Rejected', icon: XCircle,     cls: 'text-red-600 bg-red-50 dark:bg-red-950/30 dark:text-red-400' },
 }
 
+function formatStamp(iso) { return format(new Date(iso), 'MMM d, yyyy h:mm a') }
+
 function SortHeader({ label, sortKey, sort, onSort, className }) {
   const active = sort.key === sortKey
   return (
@@ -173,7 +175,15 @@ export default function ReviewsPage() {
                       <p className="text-xs text-gray-400 truncate">{t.profiles?.email}</p>
                     </div>
                   </div>
-                  <span className="text-sm hidden sm:block">{format(new Date(t.date), 'MMM d, yyyy')}</span>
+                  <div className="hidden sm:block min-w-0">
+                    <p className="text-sm">{format(new Date(t.date), 'MMM d, yyyy')}</p>
+                    <p className="text-xs text-gray-400 truncate">Submitted {formatStamp(t.created_at)}</p>
+                    {t.status !== 'pending' && (
+                      <p className={clsx('text-xs truncate', t.status === 'approved' ? 'text-emerald-500' : 'text-red-500')}>
+                        {t.status === 'approved' ? 'Approved' : 'Rejected'} {formatStamp(t.updated_at)}
+                      </p>
+                    )}
+                  </div>
                   <span className="text-sm font-semibold hidden sm:block text-blue-600 dark:text-blue-400">{t.total_hours ?? '—'}h</span>
                   <div className="flex items-center justify-between gap-2 ml-auto sm:ml-0">
                     <div className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full', cls)}>

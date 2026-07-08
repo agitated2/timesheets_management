@@ -19,6 +19,8 @@ const statusConfig = {
   rejected: { label: 'Rejected', icon: XCircle,     color: 'text-red-600 dark:text-red-400',        bg: 'bg-red-50    dark:bg-red-950/30' },
 }
 
+function formatStamp(iso) { return format(new Date(iso), 'MMM d, yyyy h:mm a') }
+
 function getPageNumbers(current, total) {
   if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
   const set = new Set([1, total, current, current - 1, current + 1].filter(p => p >= 1 && p <= total))
@@ -120,6 +122,14 @@ function TimesheetRow({ ts }) {
               {ts.total_hours ? `${ts.total_hours}h logged` : 'Hours not recorded'}
               {ts.rejection_reason && (
                 <span className="ml-2 text-red-500">· Reason: {ts.rejection_reason}</span>
+              )}
+            </p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Submitted {formatStamp(ts.created_at)}
+              {ts.status !== 'pending' && (
+                <span className={ts.status === 'approved' ? 'text-emerald-500' : 'text-red-500'}>
+                  {' · '}{ts.status === 'approved' ? 'Approved' : 'Rejected'} {formatStamp(ts.updated_at)}
+                </span>
               )}
             </p>
           </div>
