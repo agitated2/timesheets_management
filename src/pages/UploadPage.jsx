@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, UserX,
-  Calendar, Clock, ChevronDown, ChevronUp, AlertTriangle, XCircle,
-  PlusCircle, Plus, Trash2, Briefcase, ChevronRight,
+  Calendar, ChevronDown, ChevronUp, AlertTriangle, XCircle,
+  Plus, Trash2, Briefcase, ChevronRight,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
@@ -11,6 +11,7 @@ import { canLogToStage, isStageSelectable } from '../lib/projectRules'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
+import TimesheetPreview from '../components/TimesheetPreview'
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -128,7 +129,7 @@ function SuccessScreen({ result, onReset, navigate }) {
   )
 }
 
-// ── Confirmation screen ──────────────────────────────────────────
+// ── Confirmation screen (Excel path) ──────────────────────────────
 function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
   const {
     days, totalDays, totalHours,
@@ -137,8 +138,10 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
     projectViolations = [], hasProjectViolations = false,
     disciplineViolations = [], hasDisciplineViolations = false,
     leaveViolations = [], hasLeaveViolations = false,
+    duplicateDayViolations = [], hasDuplicateDayViolations = false,
   } = preview
-  const blocked = hasDiscrepancies || hasMissingTasks || hasProjectViolations || hasDisciplineViolations || hasLeaveViolations
+  const blocked = hasDiscrepancies || hasMissingTasks || hasProjectViolations ||
+    hasDisciplineViolations || hasLeaveViolations || hasDuplicateDayViolations
   const [expandedDay, setExpandedDay] = useState(null)
   const isMulti   = totalDays > 1
   const dateRange = isMulti
@@ -321,6 +324,28 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
           </div>
         )}
 
+        {/* ── Duplicate-day conflicts ───────────────────────── */}
+        {hasDuplicateDayViolations && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {duplicateDayViolations.length} date{duplicateDayViolations.length !== 1 ? 's' : ''} already submitted
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {duplicateDayViolations.map((v, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <p className="font-medium text-gray-800 dark:text-gray-200">{format(parseISO(v.date), 'EEE, MMM d, yyyy')}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    You already have a timesheet awaiting review for this date.
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              You can submit again for these dates only if your manager rejects the existing submission.
+            </p>
+          </div>
+        )}
+
         {/* ── Leave conflicts ──────────────────────────────── */}
         {hasLeaveViolations && (
           <div className="space-y-2">
@@ -421,12 +446,43 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
   )
 }
 
+// ── Auto-growing task textarea ────────────────────────────────────
+// Height grows/shrinks with content (long task descriptions); column
+// widths stay fixed so rows stay aligned with the header above them.
+function AutoGrowTextarea({ value, onChange, placeholder, className }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [value])
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      className={clsx('input text-sm resize-none overflow-hidden leading-snug', className)}
+    />
+  )
+}
+
+// Shared column template for the entry grid header + every row, so they
+// always line up. Kept as one literal string (used verbatim in classNames
+// below) so Tailwind's content scanner picks up the arbitrary-value class.
+const ENTRY_GRID = 'sm:grid-cols-[1.3fr_1.1fr_1.1fr_84px_84px_60px_1.7fr_32px]'
+
 // ── In-App Entry ─────────────────────────────────────────────────
-function InAppEntry({ profile, onBack, onSuccess }) {
+function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   const [projects, setProjects]       = useState([])
   const [disciplines, setDisciplines] = useState([])
   const [loadingProjects, setLoading] = useState(true)
   const [dateEntries, setDateEntries] = useState([newDateEntry()])
+  const [previewing, setPreviewing]   = useState(false)
+  const [checkingDup, setCheckingDup] = useState(false)
+  const [dupError, setDupError]       = useState('')
   const [submitting, setSubmitting]   = useState(false)
   const [submitError, setSubmitError] = useState('')
 
@@ -455,16 +511,29 @@ function InAppEntry({ profile, onBack, onSuccess }) {
   function newDateEntry() {
     return { id: crypto.randomUUID(), date: format(new Date(), 'yyyy-MM-dd'), entries: [] }
   }
-  function newEntry() {
-    // Default each entry to the employee's home discipline; they can change it.
-    return { id: crypto.randomUUID(), projectId: '', stageId: '', timeFrom: '', timeTo: '', task: '', disciplineId: profile?.discipline_id || '' }
+  // Carries Project/Stage/Discipline over from the previous row (time and
+  // task left blank) — the common pattern of logging several tasks against
+  // the same project/stage back to back. Falls back to the employee's home
+  // discipline when there's no previous row to carry from.
+  function newEntry(carryFrom) {
+    return {
+      id: crypto.randomUUID(),
+      projectId:    carryFrom?.projectId    || '',
+      stageId:      carryFrom?.stageId      || '',
+      disciplineId: carryFrom?.disciplineId || profile?.discipline_id || '',
+      timeFrom: '', timeTo: '', task: '',
+    }
   }
 
   function addDate() { setDateEntries(prev => [...prev, newDateEntry()]) }
   function removeDate(id) { setDateEntries(prev => prev.filter(d => d.id !== id)) }
   function setDate(id, date) { setDateEntries(prev => prev.map(d => d.id === id ? { ...d, date } : d)) }
   function addEntry(dateId) {
-    setDateEntries(prev => prev.map(d => d.id === dateId ? { ...d, entries: [...d.entries, newEntry()] } : d))
+    setDateEntries(prev => prev.map(d => {
+      if (d.id !== dateId) return d
+      const last = d.entries[d.entries.length - 1]
+      return { ...d, entries: [...d.entries, newEntry(last)] }
+    }))
   }
   function removeEntry(dateId, entryId) {
     setDateEntries(prev => prev.map(d => d.id === dateId ? { ...d, entries: d.entries.filter(e => e.id !== entryId) } : d))
@@ -520,6 +589,36 @@ function InAppEntry({ profile, onBack, onSuccess }) {
       de.entries.every(e => e.projectId && e.stageId && e.timeFrom && e.timeTo && e.task?.trim() && e.disciplineId)
     )
 
+  // Duplicate-day guard: catches both a repeated date within this same
+  // submission, and a date that already has a pending/approved timesheet.
+  // The DB's partial unique index is the real guarantee (caught below too,
+  // in case of a race) — this is just so the employee sees it clearly and
+  // before wasting a step on the preview screen.
+  async function handlePreviewClick() {
+    setDupError('')
+    const dates = dateEntries.map(d => d.date).filter(Boolean)
+    const seen = new Set()
+    const withinDupe = dates.find(d => seen.has(d) || !seen.add(d))
+    if (withinDupe) {
+      setDupError(`${format(parseISO(withinDupe), 'MMM d, yyyy')} is entered more than once above — each date can only appear once.`)
+      return
+    }
+    setCheckingDup(true)
+    const { data: existing } = await supabase
+      .from('timesheets')
+      .select('date')
+      .eq('employee_id', profile.id)
+      .in('date', dates)
+      .in('status', ['pending', 'approved'])
+    setCheckingDup(false)
+    if (existing?.length) {
+      const conflictDates = existing.map(e => format(parseISO(e.date), 'MMM d, yyyy')).join(', ')
+      setDupError(`You already have a timesheet awaiting review for ${conflictDates}. You can submit again only if your manager rejects it.`)
+      return
+    }
+    setPreviewing(true)
+  }
+
   async function handleSubmit() {
     setSubmitError('')
     setSubmitting(true)
@@ -539,7 +638,16 @@ function InAppEntry({ profile, onBack, onSuccess }) {
         .select()
         .single()
 
-      if (tsErr) { setSubmitError(tsErr.message); setSubmitting(false); return }
+      if (tsErr) {
+        setSubmitting(false)
+        if (tsErr.code === '23505') {
+          setPreviewing(false)
+          setSubmitError(`You already have a timesheet awaiting review for ${format(parseISO(de.date), 'MMM d, yyyy')}. You can submit again only if your manager rejects it.`)
+        } else {
+          setSubmitError(tsErr.message)
+        }
+        return
+      }
 
       const entries = de.entries.map(e => {
         const proj  = projects.find(p => p.id === e.projectId)
@@ -566,7 +674,9 @@ function InAppEntry({ profile, onBack, onSuccess }) {
         // Roll back the just-created timesheet so a leave-blocked entry
         // (or any failure) never leaves an empty timesheet behind.
         await supabase.from('timesheets').delete().eq('id', ts.id)
-        setSubmitError(entErr.message); setSubmitting(false); return
+        setSubmitting(false)
+        setSubmitError(entErr.message)
+        return
       }
 
       resultDays.push({
@@ -584,20 +694,94 @@ function InAppEntry({ profile, onBack, onSuccess }) {
     })
   }
 
+  // ── Preview step ─────────────────────────────────────────────
+  if (previewing) {
+    const grandTotal = dateEntries.reduce((s, de) =>
+      s + de.entries.reduce((s2, e) => s2 + (calcHours(e.timeFrom, e.timeTo) || 0), 0), 0)
+
+    return (
+      <div className="max-w-2xl space-y-5">
+        <div className="flex items-center gap-3">
+          <button onClick={() => setPreviewing(false)} disabled={submitting} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
+            <ChevronRight size={18} className="rotate-180" />
+          </button>
+          <div>
+            <h1 className="page-title">Preview submission</h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">This is exactly what your manager will see.</p>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {dateEntries.map(de => {
+            const dayHours = de.entries.reduce((s, e) => s + (calcHours(e.timeFrom, e.timeTo) || 0), 0)
+            const previewEntries = de.entries.map(e => {
+              const proj  = projects.find(p => p.id === e.projectId)
+              const stage = proj?.project_stages?.find(s => s.id === e.stageId)
+              const disc  = disciplines.find(d => d.id === e.disciplineId)
+              return {
+                time_from: e.timeFrom, time_to: e.timeTo,
+                hours_decimal: calcHours(e.timeFrom, e.timeTo),
+                project_name: proj?.name, stage_name: stage?.name,
+                discipline_name: disc?.name, task: e.task,
+              }
+            })
+            return (
+              <div key={de.id} className="card overflow-hidden">
+                <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 flex items-center justify-between">
+                  <span className="text-sm font-medium flex items-center gap-2">
+                    <Calendar size={14} className="text-ae7-red" />
+                    {format(parseISO(de.date), 'EEEE, MMM d, yyyy')}
+                  </span>
+                  <span className="text-xs text-gray-400">{dayHours.toFixed(2)}h</span>
+                </div>
+                <TimesheetPreview entries={previewEntries} showTotal={false} />
+              </div>
+            )
+          })}
+        </div>
+
+        <p className="text-xs text-gray-400 text-center">
+          {dateEntries.length > 1
+            ? `This will create ${dateEntries.length} separate timesheet submissions — one per day, each reviewed independently. Total: ${grandTotal.toFixed(2)}h`
+            : `Your manager will be notified to review this timesheet. Total: ${grandTotal.toFixed(2)}h`}
+        </p>
+
+        {submitError && (
+          <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-xl px-3 py-2">
+            <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+            {submitError}
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button onClick={() => setPreviewing(false)} disabled={submitting} className="btn-secondary flex-1">
+            Back to editing
+          </button>
+          <button onClick={handleSubmit} disabled={submitting} className="btn-primary flex-1">
+            {submitting
+              ? <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Submitting…</>
+              : <><CheckCircle size={15} /> Confirm &amp; Submit</>
+            }
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Editing step ─────────────────────────────────────────────
   return (
     <div className="max-w-2xl space-y-5">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <button onClick={onBack} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
-          <ChevronRight size={18} className="rotate-180" />
-        </button>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="page-title flex items-center gap-2">
-            In-app timesheet entry
-            <span className="text-xs font-semibold bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full">Beta</span>
-          </h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Add dates and entries directly in the browser.</p>
+          <h1 className="page-title">Upload timesheet</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Add your entries for each date below.</p>
         </div>
+        {xlsxEnabled && (
+          <button onClick={onSwitchToExcel} className="text-sm text-gray-500 hover:text-ae7-red flex items-center gap-1.5 transition-colors">
+            <FileSpreadsheet size={14} /> Upload an Excel file instead
+          </button>
+        )}
       </div>
 
       {/* Stage issue summary */}
@@ -651,6 +835,12 @@ function InAppEntry({ profile, onBack, onSuccess }) {
             <Plus size={15} /> Add date
           </button>
 
+          {dupError && (
+            <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-xl px-3 py-2">
+              <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+              {dupError}
+            </div>
+          )}
           {submitError && (
             <div className="flex items-start gap-2 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-xl px-3 py-2">
               <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
@@ -659,19 +849,18 @@ function InAppEntry({ profile, onBack, onSuccess }) {
           )}
 
           <div className="flex items-center gap-3">
-            <button onClick={onBack} className="btn-secondary">Cancel</button>
             <button
-              onClick={handleSubmit}
-              disabled={!isReady || submitting}
+              onClick={handlePreviewClick}
+              disabled={!isReady || checkingDup}
               className="btn-primary flex-1"
             >
-              {submitting
-                ? <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Submitting…</>
+              {checkingDup
+                ? <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Checking…</>
                 : hasStageIssues
                   ? 'Fix stage issues to submit'
                   : !isReady
                     ? 'Fill in all required fields'
-                    : <><CheckCircle size={15} /> Submit all</>
+                    : <><Calendar size={15} /> Preview &amp; Submit</>
               }
             </button>
           </div>
@@ -701,27 +890,35 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
         )}
       </div>
 
-      <div className="divide-y divide-gray-50 dark:divide-gray-800/60">
-        {de.entries.length === 0 && (
-          <p className="text-xs text-gray-400 italic px-5 py-3">No entries yet. Click "Add Entry" below.</p>
-        )}
-        {de.entries.map(e => (
-          <EntryRow
-            key={e.id}
-            entry={e}
-            date={de.date}
-            projects={projects}
-            disciplines={disciplines}
-            onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
-            onRemove={() => onRemoveEntry(e.id)}
-            getStageWarning={getStageWarning}
-          />
-        ))}
-      </div>
+      {de.entries.length === 0 ? (
+        <p className="text-xs text-gray-400 italic px-5 py-3">No entries yet. Click "Add row" below.</p>
+      ) : (
+        <>
+          {/* Column header (desktop only) */}
+          <div className={clsx('hidden sm:grid gap-2 px-5 pt-3 pb-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider', ENTRY_GRID)}>
+            <span>Project</span><span>Stage</span><span>Discipline</span>
+            <span>From</span><span>To</span><span>Hours</span><span>Task</span><span />
+          </div>
+          <div className="divide-y divide-gray-50 dark:divide-gray-800/60">
+            {de.entries.map(e => (
+              <EntryRow
+                key={e.id}
+                entry={e}
+                date={de.date}
+                projects={projects}
+                disciplines={disciplines}
+                onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
+                onRemove={() => onRemoveEntry(e.id)}
+                getStageWarning={getStageWarning}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-800">
         <button onClick={onAddEntry} className="text-sm text-ae7-red hover:underline flex items-center gap-1">
-          <Plus size={14} /> Add Entry
+          <Plus size={14} /> Add row
         </button>
       </div>
     </div>
@@ -743,47 +940,65 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
   const warning = getStageWarning(entry, date)
 
   return (
-    <div className="px-5 py-4 space-y-3">
-      <div className="grid grid-cols-2 gap-3">
-        {/* Project */}
-        <div>
-          <label className="text-xs font-medium text-gray-500 mb-1 block">Project *</label>
-          <select
-            value={entry.projectId}
-            onChange={e => onUpdate('projectId', e.target.value)}
-            className="input text-sm"
-          >
-            <option value="">Select project…</option>
-            {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+    <div className="px-5 py-3 space-y-2">
+      <div className={clsx('grid grid-cols-2 sm:grid gap-2 items-start', ENTRY_GRID)}>
+        <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Project *</div>
+        <select
+          value={entry.projectId}
+          onChange={e => onUpdate('projectId', e.target.value)}
+          className="input text-sm"
+        >
+          <option value="">Select project…</option>
+          {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+
+        <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Stage *</div>
+        <select
+          value={entry.stageId}
+          onChange={e => onUpdate('stageId', e.target.value)}
+          disabled={!entry.projectId}
+          className={clsx('input text-sm', !entry.projectId && 'opacity-50 cursor-not-allowed')}
+        >
+          <option value="">Select stage…</option>
+          {stages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+
+        <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Discipline *</div>
+        <select
+          value={entry.disciplineId || ''}
+          onChange={e => onUpdate('disciplineId', e.target.value)}
+          className="input text-sm"
+        >
+          <option value="">Select discipline…</option>
+          {disciplines.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+        </select>
+
+        <div className="sm:hidden text-xs font-medium text-gray-500">From *</div>
+        <input type="time" value={entry.timeFrom} onChange={e => onUpdate('timeFrom', e.target.value)} className="input text-sm" />
+
+        <div className="sm:hidden text-xs font-medium text-gray-500">To *</div>
+        <input type="time" value={entry.timeTo} onChange={e => onUpdate('timeTo', e.target.value)} className="input text-sm" />
+
+        <div className="sm:hidden text-xs font-medium text-gray-500">Hours</div>
+        <div className="input text-sm text-gray-500 dark:text-gray-400 flex items-center justify-center">
+          {hours !== null ? `${hours}h` : '—'}
         </div>
 
-        {/* Stage */}
-        <div>
-          <label className="text-xs font-medium text-gray-500 mb-1 block">Stage *</label>
-          <select
-            value={entry.stageId}
-            onChange={e => onUpdate('stageId', e.target.value)}
-            disabled={!entry.projectId}
-            className={clsx('input text-sm', !entry.projectId && 'opacity-50 cursor-not-allowed')}
-          >
-            <option value="">Select stage…</option>
-            {stages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </div>
+        <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Task / Description *</div>
+        <AutoGrowTextarea
+          value={entry.task}
+          onChange={e => onUpdate('task', e.target.value)}
+          placeholder="What did you work on?"
+          className="col-span-2 sm:col-span-1"
+        />
 
-        {/* Discipline */}
-        <div className="col-span-2">
-          <label className="text-xs font-medium text-gray-500 mb-1 block">Discipline *</label>
-          <select
-            value={entry.disciplineId || ''}
-            onChange={e => onUpdate('disciplineId', e.target.value)}
-            className="input text-sm"
-          >
-            <option value="">Select discipline…</option>
-            {disciplines.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select>
-        </div>
+        <button
+          onClick={onRemove}
+          className="justify-self-end sm:justify-self-auto p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors"
+          title="Remove row"
+        >
+          <Trash2 size={15} />
+        </button>
       </div>
 
       {/* Stage warning (blocking) */}
@@ -793,45 +1008,6 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
           {warning}
         </div>
       )}
-
-      <div className="grid grid-cols-3 gap-3">
-        {/* Time from */}
-        <div>
-          <label className="text-xs font-medium text-gray-500 mb-1 block">From *</label>
-          <input type="time" value={entry.timeFrom} onChange={e => onUpdate('timeFrom', e.target.value)} className="input text-sm" />
-        </div>
-
-        {/* Time to */}
-        <div>
-          <label className="text-xs font-medium text-gray-500 mb-1 block">To *</label>
-          <input type="time" value={entry.timeTo} onChange={e => onUpdate('timeTo', e.target.value)} className="input text-sm" />
-        </div>
-
-        {/* Computed hours */}
-        <div>
-          <label className="text-xs font-medium text-gray-500 mb-1 block">Hours</label>
-          <div className="input text-sm text-gray-500 dark:text-gray-400 flex items-center">
-            {hours !== null ? `${hours}h` : '—'}
-          </div>
-        </div>
-      </div>
-
-      {/* Task/description + remove button */}
-      <div className="flex items-end gap-3">
-        <div className="flex-1">
-          <label className="text-xs font-medium text-gray-500 mb-1 block">Task / Description *</label>
-          <input
-            type="text"
-            value={entry.task}
-            onChange={e => onUpdate('task', e.target.value)}
-            placeholder="Required — what did you work on?"
-            className="input text-sm"
-          />
-        </div>
-        <button onClick={onRemove} className="p-2 rounded-xl text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors mb-0.5">
-          <Trash2 size={15} />
-        </button>
-      </div>
     </div>
   )
 }
@@ -846,8 +1022,14 @@ export default function UploadPage() {
 function UploadPageInner({ profile }) {
   const navigate   = useNavigate()
 
-  const [uploadMode, setUploadMode]   = useState('excel')   // 'excel' | 'inapp'
+  const [xlsxEnabled, setXlsxEnabled] = useState(false)
+  const [uploadMode, setUploadMode]   = useState('inapp')   // 'inapp' | 'excel'
   const [inappResult, setInappResult] = useState(null)
+
+  useEffect(() => {
+    supabase.from('app_settings').select('xlsx_upload_enabled').eq('id', 1).single()
+      .then(({ data }) => setXlsxEnabled(!!data?.xlsx_upload_enabled))
+  }, [])
 
   // Excel flow state
   const [file, setFile]           = useState(null)
@@ -900,15 +1082,16 @@ function UploadPageInner({ profile }) {
 
   // ── In-app success ───────────────────────────────────────────
   if (uploadMode === 'inapp' && inappResult) {
-    return <SuccessScreen result={inappResult} onReset={() => { setInappResult(null); setUploadMode('excel') }} navigate={navigate} />
+    return <SuccessScreen result={inappResult} onReset={() => setInappResult(null)} navigate={navigate} />
   }
 
-  // ── In-app entry mode ────────────────────────────────────────
+  // ── In-app entry mode (default) ───────────────────────────────
   if (uploadMode === 'inapp') {
     return (
       <InAppEntry
         profile={profile}
-        onBack={() => setUploadMode('excel')}
+        xlsxEnabled={xlsxEnabled}
+        onSwitchToExcel={() => setUploadMode('excel')}
         onSuccess={r => setInappResult(r)}
       />
     )
@@ -930,11 +1113,16 @@ function UploadPageInner({ profile }) {
   // ── Excel: upload form ───────────────────────────────────────
   return (
     <div className="max-w-lg mx-auto space-y-6">
-      <div>
-        <h1 className="page-title">Upload timesheet</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-          Upload your daily or weekly Excel timesheet file.
-        </p>
+      <div className="flex items-center gap-3">
+        <button onClick={() => setUploadMode('inapp')} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
+          <ChevronRight size={18} className="rotate-180" />
+        </button>
+        <div>
+          <h1 className="page-title">Upload Excel timesheet</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+            Upload your daily or weekly Excel timesheet file.
+          </p>
+        </div>
       </div>
 
       <div className="card p-6 space-y-5">
@@ -1012,16 +1200,6 @@ function UploadPageInner({ profile }) {
           }
         </button>
       </div>
-
-      {/* Floating in-app beta button */}
-      <button
-        onClick={() => setUploadMode('inapp')}
-        className="fixed bottom-6 right-6 z-40 flex items-center gap-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-medium px-4 py-2.5 rounded-2xl shadow-lg hover:shadow-xl hover:scale-[1.03] transition-all"
-      >
-        <PlusCircle size={15} />
-        In-app timesheet entry
-        <span className="text-xs font-semibold bg-amber-400 text-amber-900 px-1.5 py-0.5 rounded-full">Beta</span>
-      </button>
     </div>
   )
 }

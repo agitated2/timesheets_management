@@ -518,8 +518,29 @@ export default function AdminPage() {
   const [tsTarget, setTsTarget]           = useState(null)   // user to manage timesheets for
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [deleting, setDeleting]           = useState(false)
+  const [settings, setSettings]           = useState(null)
+  const [savingSettings, setSavingSettings] = useState(false)
 
-  useEffect(() => { loadUsers(); loadPending() }, [])
+  useEffect(() => { loadUsers(); loadPending(); loadSettings() }, [])
+
+  async function loadSettings() {
+    const { data } = await supabase.from('app_settings').select('*').eq('id', 1).single()
+    setSettings(data)
+  }
+
+  async function toggleXlsxUpload() {
+    if (!settings) return
+    setSavingSettings(true)
+    const next = !settings.xlsx_upload_enabled
+    const { error } = await supabase
+      .from('app_settings')
+      .update({ xlsx_upload_enabled: next, updated_by: profile.id })
+      .eq('id', 1)
+    setSavingSettings(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    setSettings(prev => ({ ...prev, xlsx_upload_enabled: next }))
+    showToast(next ? 'XLSX upload enabled.' : 'XLSX upload disabled.')
+  }
 
   async function loadUsers() {
     const { data } = await supabase.from('profiles').select('*').order('created_at', { ascending: false })
@@ -620,7 +641,7 @@ export default function AdminPage() {
       </div>
 
       <Tabs
-        tabs={[{ key: 'users', label: 'Users' }, { key: 'timesheets', label: 'Timesheets' }]}
+        tabs={[{ key: 'users', label: 'Users' }, { key: 'timesheets', label: 'Timesheets' }, { key: 'settings', label: 'Settings' }]}
         active={activeTab}
         onChange={setActiveTab}
       />
@@ -793,6 +814,40 @@ export default function AdminPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'settings' && (
+        <div className="card p-5 space-y-4 max-w-lg">
+          <div>
+            <h2 className="font-semibold text-sm mb-1">Timesheet entry</h2>
+            <p className="text-xs text-gray-400">Control which submission methods employees can use.</p>
+          </div>
+          <div className="flex items-center justify-between gap-4 py-2">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Allow XLSX timesheet upload</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                In-app entry is always available. When this is on, employees may also upload an Excel file instead.
+              </p>
+            </div>
+            <button
+              onClick={toggleXlsxUpload}
+              disabled={savingSettings || !settings}
+              role="switch"
+              aria-checked={!!settings?.xlsx_upload_enabled}
+              className={clsx(
+                'relative w-11 h-6 rounded-full transition-colors flex-shrink-0 disabled:opacity-50',
+                settings?.xlsx_upload_enabled ? 'bg-ae7-red' : 'bg-gray-300 dark:bg-gray-700'
+              )}
+            >
+              <span
+                className={clsx(
+                  'absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform',
+                  settings?.xlsx_upload_enabled && 'translate-x-5'
+                )}
+              />
+            </button>
+          </div>
         </div>
       )}
     </div>

@@ -13,6 +13,19 @@
 -- Idempotent — safe to re-run.
 -- =============================================================
 
+-- ── Retire the tracking-type lock ─────────────────────────────
+-- A pre-existing trigger blocked ANY update that changes tracking_type
+-- (added back when projects could be either 'hours' or 'date', to stop a
+-- direct table edit from switching an existing project's type). It must be
+-- dropped BEFORE the backfill below, which converts every 'hours' project
+-- to 'date' — otherwise that UPDATE fails with:
+--   "A project's tracking type cannot be changed after creation."
+-- The trigger is now redundant, not just inconvenient: create_project()
+-- already forces every new project to 'date', so nothing will ever need to
+-- change tracking_type again.
+DROP TRIGGER IF EXISTS projects_lock_tracking_type ON public.projects;
+DROP FUNCTION IF EXISTS public.lock_project_tracking_type();
+
 -- ── Flag + backfill ──────────────────────────────────────────
 ALTER TABLE public.projects
   ADD COLUMN IF NOT EXISTS needs_date_review BOOLEAN NOT NULL DEFAULT false;

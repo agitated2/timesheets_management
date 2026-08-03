@@ -413,6 +413,35 @@ CREATE POLICY "notif_update_own" ON public.notifications
   FOR UPDATE USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
 -- ---------------------------------------------------------------
+-- APP SETTINGS — singleton row of feature flags (see migration_v8).
+-- Currently just the XLSX upload toggle; in-app entry is the default.
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.app_settings (
+  id                  SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  xlsx_upload_enabled BOOLEAN NOT NULL DEFAULT false,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by          UUID REFERENCES public.profiles(id)
+);
+INSERT INTO public.app_settings (id) VALUES (1) ON CONFLICT DO NOTHING;
+
+ALTER TABLE public.app_settings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "settings_read"   ON public.app_settings;
+DROP POLICY IF EXISTS "settings_manage" ON public.app_settings;
+CREATE POLICY "settings_read" ON public.app_settings
+  FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "settings_manage" ON public.app_settings
+  FOR ALL USING (public.my_has_role('it')) WITH CHECK (public.my_has_role('it'));
+
+-- ---------------------------------------------------------------
+-- ONE TIMESHEET PER EMPLOYEE PER DAY (see migration_v8)
+-- An employee may hold at most one pending-or-approved timesheet per date;
+-- resubmission is possible once a manager rejects the previous one.
+-- ---------------------------------------------------------------
+CREATE UNIQUE INDEX IF NOT EXISTS idx_timesheets_one_per_day
+  ON public.timesheets (employee_id, date)
+  WHERE status IN ('pending', 'approved');
+
+-- ---------------------------------------------------------------
 -- PROJECTS
 -- ---------------------------------------------------------------
 
@@ -1268,21 +1297,14 @@ CREATE POLICY "audit_read" ON public.project_audit_logs
 -- (the table is append-only and immutable from the client's perspective).
 
 -- ---------------------------------------------------------------
--- LOCK tracking_type after creation
+-- tracking_type lock — RETIRED (see migration_v7).
+-- Used to block switching an existing project between 'hours' and 'date'.
+-- Now redundant: create_project() forces every new project to 'date', so
+-- tracking_type never changes post-creation regardless. Keeping the trigger
+-- would only block the v7 backfill UPDATE that converts legacy 'hours' rows.
 -- ---------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.lock_project_tracking_type()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.tracking_type <> OLD.tracking_type THEN
-    RAISE EXCEPTION 'A project''s tracking type cannot be changed after creation.';
-  END IF;
-  RETURN NEW;
-END;
-$$;
 DROP TRIGGER IF EXISTS projects_lock_tracking_type ON public.projects;
-CREATE TRIGGER projects_lock_tracking_type
-  BEFORE UPDATE ON public.projects
-  FOR EACH ROW EXECUTE FUNCTION public.lock_project_tracking_type();
+DROP FUNCTION IF EXISTS public.lock_project_tracking_type();
 
 -- ---------------------------------------------------------------
 -- PREVENT DELETION of projects/stages with APPROVED timesheet data

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
+import TimesheetPreview from '../components/TimesheetPreview'
 
 export default function ReviewPage() {
   const { id } = useParams()
@@ -154,37 +155,18 @@ export default function ReviewPage() {
         <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Time entries</h2>
         </div>
-        {entries.length === 0 ? (
-          <p className="text-sm text-gray-400 text-center py-8">No entries parsed</p>
-        ) : (
-          <>
-            <div className="hidden sm:grid grid-cols-6 gap-3 px-5 py-2.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
-              <span>Time window</span>
-              <span>Hours</span>
-              <span>Project</span>
-              <span>Stage</span>
-              <span>Discipline</span>
-              <span>Task</span>
-            </div>
-            <div className="divide-y divide-gray-100 dark:divide-gray-800">
-              {entries.map((e, i) => (
-                <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-6 gap-2 px-5 py-3.5 text-sm">
-                  <span className="font-mono text-xs text-gray-500">{e.time_from ?? '—'} – {e.time_to ?? '—'}</span>
-                  <span className="font-semibold text-blue-600 dark:text-blue-400">{e.hours_decimal != null ? `${e.hours_decimal}h` : '—'}</span>
-                  <span className="font-medium">{e.project_name || '—'}</span>
-                  <span className="text-gray-500">{e.project_stages?.name || '—'}</span>
-                  <span className="text-gray-500">{e.disciplines?.name || '—'}</span>
-                  <span className="text-gray-400">{e.task || '—'}</span>
-                </div>
-              ))}
-            </div>
-            <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-800 flex justify-end">
-              <span className="text-sm font-bold text-blue-600 dark:text-blue-400">
-                Total: {entries.reduce((s, e) => s + (e.hours_decimal || 0), 0).toFixed(2)}h
-              </span>
-            </div>
-          </>
-        )}
+        <TimesheetPreview
+          emptyLabel="No entries parsed"
+          entries={entries.map(e => ({
+            time_from:       e.time_from,
+            time_to:         e.time_to,
+            hours_decimal:   e.hours_decimal,
+            project_name:    e.project_name,
+            stage_name:      e.project_stages?.name,
+            discipline_name: e.disciplines?.name,
+            task:            e.task,
+          }))}
+        />
       </div>
 
       {/* Actions */}

@@ -27,6 +27,14 @@ exports.handler = async (event) => {
     const { data: { user }, error: authErr } = await supabaseAdmin.auth.getUser(token)
     if (authErr || !user) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Invalid token' }) }
 
+    // XLSX upload is opt-in per deployment (IT Panel → Settings). Checked here
+    // too, not just hidden in the UI, since this function is reachable directly
+    // regardless of what the client renders.
+    const { data: settings } = await supabaseAdmin.from('app_settings').select('xlsx_upload_enabled').eq('id', 1).single()
+    if (!settings?.xlsx_upload_enabled) {
+      return { statusCode: 403, headers, body: JSON.stringify({ error: 'XLSX upload is disabled. Use in-app timesheet entry.' }) }
+    }
+
     const { file, fileName, dryRun } = JSON.parse(event.body)
     if (!file) return { statusCode: 400, headers, body: JSON.stringify({ error: 'No file provided' }) }
 
@@ -65,6 +73,7 @@ exports.handler = async (event) => {
       const projectViolations    = await checkProjectViolations(supabaseAdmin, user.id, days)
       const disciplineViolations = await checkDisciplineViolations(supabaseAdmin, days)
       const leaveViolations      = await checkLeaveViolations(supabaseAdmin, user.id, days)
+      const duplicateDayViolations = await checkDuplicateDayViolations(supabaseAdmin, user.id, days)
       return {
         statusCode: 200,
         headers,
@@ -83,6 +92,8 @@ exports.handler = async (event) => {
           hasDisciplineViolations: disciplineViolations.length > 0,
           leaveViolations,
           hasLeaveViolations: leaveViolations.length > 0,
+          duplicateDayViolations,
+          hasDuplicateDayViolations: duplicateDayViolations.length > 0,
         }),
       }
     }
@@ -146,6 +157,23 @@ exports.handler = async (event) => {
         body: JSON.stringify({
           error: 'You have an approved leave for this date range. Please adjust your timesheet entries.',
           leaveViolations,
+        }),
+      }
+    }
+
+    // ── Block actual upload if a date already has a pending/approved timesheet ──
+    // One timesheet per employee per day — resubmission is only possible once a
+    // manager rejects the previous one. The DB's partial unique index is the
+    // real guarantee; this check exists so the employee sees it clearly instead
+    // of a raw insert-time error.
+    const duplicateDayViolations = await checkDuplicateDayViolations(supabaseAdmin, user.id, days)
+    if (duplicateDayViolations.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: `You already have a timesheet awaiting review for ${duplicateDayViolations.length === 1 ? 'this date' : 'these dates'}. You can submit again only if your manager rejects it.`,
+          duplicateDayViolations,
         }),
       }
     }
@@ -377,6 +405,26 @@ async function checkLeaveViolations(db, userId, days) {
     }
   }
   return violations
+}
+
+// ---------------------------------------------------------------
+// DUPLICATE-DAY VALIDATION
+// An employee may hold at most one pending-or-approved timesheet per date
+// (enforced at the DB level by a partial unique index — see migration_v8).
+// Flags any day in this upload that already has one, so the employee sees
+// a clear message instead of a raw insert-time error.
+// ---------------------------------------------------------------
+
+async function checkDuplicateDayViolations(db, userId, days) {
+  if (days.length === 0) return []
+  const dates = days.map(d => d.date)
+  const { data: existing } = await db
+    .from('timesheets')
+    .select('date')
+    .eq('employee_id', userId)
+    .in('date', dates)
+    .in('status', ['pending', 'approved'])
+  return (existing || []).map(e => ({ date: e.date }))
 }
 
 // ---------------------------------------------------------------
