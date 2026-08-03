@@ -1230,7 +1230,10 @@ ALTER TABLE public.projects
   ADD COLUMN IF NOT EXISTS tracking_type project_tracking_type NOT NULL DEFAULT 'date',
   ADD COLUMN IF NOT EXISTS start_date DATE,
   ADD COLUMN IF NOT EXISTS end_date   DATE,
-  ADD COLUMN IF NOT EXISTS total_hours NUMERIC(10,2);
+  ADD COLUMN IF NOT EXISTS total_hours NUMERIC(10,2),
+  -- Hour-pool tracking is retired (see migration_v7) — tracking_type/total_hours
+  -- are retained on the table but every project is date-tracked going forward.
+  ADD COLUMN IF NOT EXISTS needs_date_review BOOLEAN NOT NULL DEFAULT false;
 
 ALTER TABLE public.project_stages
   ADD COLUMN IF NOT EXISTS tracking_state  stage_state NOT NULL DEFAULT 'active',
@@ -1335,6 +1338,8 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 
 -- Stages with computed lifecycle state + logged hours, for display.
+-- Every stage is date-tracked now (see migration_v7); logged_hours is kept as
+-- a plain "actual hours worked" figure for analytics, with no pool to compare against.
 DROP VIEW IF EXISTS public.project_stages_view;
 CREATE VIEW public.project_stages_view WITH (security_invoker = true) AS
 SELECT
@@ -1342,10 +1347,8 @@ SELECT
   p.tracking_type,
   h.logged AS logged_hours,
   CASE
-    WHEN p.tracking_type = 'hours' AND s.allocated_hours IS NOT NULL AND s.allocated_hours > 0
-         AND h.logged >= s.allocated_hours THEN 'pool_full'
-    WHEN p.tracking_type = 'date' AND s.start_date IS NOT NULL AND CURRENT_DATE < s.start_date THEN 'not_started'
-    WHEN p.tracking_type = 'date' AND s.end_date   IS NOT NULL AND CURRENT_DATE > s.end_date   THEN 'ended'
+    WHEN s.start_date IS NOT NULL AND CURRENT_DATE < s.start_date THEN 'not_started'
+    WHEN s.end_date   IS NOT NULL AND CURRENT_DATE > s.end_date   THEN 'ended'
     ELSE 'active'
   END AS effective_state
 FROM public.project_stages s
@@ -1358,22 +1361,19 @@ LEFT JOIN LATERAL (SELECT public.stage_logged_hours(s.id) AS logged) h ON true;
 CREATE OR REPLACE FUNCTION public.enforce_stage_logging()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_proj      public.projects%ROWTYPE;
-  v_stage     public.project_stages%ROWTYPE;
-  v_date      DATE;
-  v_logged    NUMERIC;
-  v_remaining NUMERIC;
+  v_proj  public.projects%ROWTYPE;
+  v_stage public.project_stages%ROWTYPE;
+  v_date  DATE;
 BEGIN
   -- A task description is mandatory for every entry (in-app and Excel alike).
   IF NEW.task IS NULL OR btrim(NEW.task) = '' THEN
     RAISE EXCEPTION 'Every timesheet entry must include a task description.';
   END IF;
 
-  -- A stage is required whenever an entry references a project: hours can
-  -- never be logged directly to a project (date- or hour-tracked alike).
+  -- A stage is required whenever an entry references a project.
   IF NEW.stage_id IS NULL THEN
     IF NEW.project_id IS NOT NULL THEN
-      RAISE EXCEPTION 'Selecting a stage is required — hours cannot be logged directly to a project.';
+      RAISE EXCEPTION 'Selecting a stage is required.';
     END IF;
     RETURN NEW;
   END IF;
@@ -1382,30 +1382,17 @@ BEGIN
   SELECT * INTO v_proj  FROM public.projects       WHERE id = v_stage.project_id;
   SELECT date INTO v_date FROM public.timesheets   WHERE id = NEW.timesheet_id;
 
-  IF v_proj.tracking_type = 'date' THEN
-    -- Not opened yet: entry dated before the stage start.
-    IF v_stage.start_date IS NOT NULL AND v_date < v_stage.start_date THEN
-      RAISE EXCEPTION 'Stage "%" has not opened yet (starts %). Contact your line manager.', v_stage.name, v_stage.start_date;
-    END IF;
-    -- Ended: forward-dated work past the end is blocked; backdating within
-    -- the window stays open indefinitely (no grace / hard-lock tail).
-    IF v_stage.end_date IS NOT NULL AND v_date > v_stage.end_date THEN
-      RAISE EXCEPTION 'Stage "%" ended on %. You can only log work dated on or before that.', v_stage.name, v_stage.end_date;
-    END IF;
-
-  ELSIF v_proj.tracking_type = 'hours'
-        AND v_stage.allocated_hours IS NOT NULL AND v_stage.allocated_hours > 0 THEN
-    v_logged    := public.stage_logged_hours(NEW.stage_id);  -- prior cumulative (NEW not yet inserted)
-    v_remaining := v_stage.allocated_hours - v_logged;
-    IF v_remaining <= 0 THEN
-      RAISE EXCEPTION 'Stage "%" has used its full hour pool (% h). Contact your line manager for an extension.', v_stage.name, v_stage.allocated_hours;
-    END IF;
-    IF COALESCE(NEW.hours_decimal, 0) > v_remaining THEN
-      RAISE EXCEPTION 'Only % h remain in stage "%". Reduce this entry to % h or request an extension.', round(v_remaining, 2), v_stage.name, round(v_remaining, 2);
-    END IF;
+  -- Not opened yet: entry dated before the stage start.
+  IF v_stage.start_date IS NOT NULL AND v_date < v_stage.start_date THEN
+    RAISE EXCEPTION 'Stage "%" has not opened yet (starts %). Contact your line manager.', v_stage.name, v_stage.start_date;
+  END IF;
+  -- Ended: forward-dated work past the end is blocked; backdating within
+  -- the window stays open indefinitely (no grace / hard-lock tail), unless extended.
+  IF v_stage.end_date IS NOT NULL AND v_date > v_stage.end_date THEN
+    RAISE EXCEPTION 'Stage "%" ended on %. You can only log work dated on or before that.', v_stage.name, v_stage.end_date;
   END IF;
 
-  NEW.is_over_budget := false;  -- overflow can no longer be stored under hard caps
+  NEW.is_over_budget := false;
   RETURN NEW;
 END;
 $$;
@@ -1415,46 +1402,9 @@ CREATE TRIGGER entries_enforce_stage
   BEFORE INSERT ON public.timesheet_entries
   FOR EACH ROW EXECUTE FUNCTION public.enforce_stage_logging();
 
--- After insert: notify project controllers the first time an hour stage's
--- pool becomes fully consumed (the entry that tips it to the cap).
-CREATE OR REPLACE FUNCTION public.after_entry_hours_close()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE
-  v_proj   public.projects%ROWTYPE;
-  v_stage  public.project_stages%ROWTYPE;
-  v_logged NUMERIC;
-BEGIN
-  IF NEW.stage_id IS NULL THEN RETURN NEW; END IF;
-  SELECT * INTO v_stage FROM public.project_stages WHERE id = NEW.stage_id;
-  SELECT * INTO v_proj  FROM public.projects       WHERE id = v_stage.project_id;
-  IF v_proj.tracking_type <> 'hours' OR v_stage.allocated_hours IS NULL OR v_stage.allocated_hours <= 0 THEN
-    RETURN NEW;
-  END IF;
-
-  v_logged := public.stage_logged_hours(NEW.stage_id);
-
-  -- Fire once: when this entry is the one that carries the pool to (or onto) the cap.
-  IF v_logged >= v_stage.allocated_hours
-     AND (v_logged - COALESCE(NEW.hours_decimal, 0)) < v_stage.allocated_hours THEN
-    UPDATE public.project_stages
-      SET tracking_state = 'soft_closed', soft_closed_at = COALESCE(soft_closed_at, now())
-      WHERE id = v_stage.id AND tracking_state = 'active';
-    INSERT INTO public.notifications (user_id, type, message)
-    SELECT id, 'project',
-      'Stage "' || v_proj.name || ' · ' || v_stage.name || '" has used its full ' ||
-      v_stage.allocated_hours || 'h pool.'
-    FROM public.profiles
-    WHERE 'projects_control' = ANY(roles) OR 'it' = ANY(roles);
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
+-- Hour-pool exhaustion notification is retired along with hour-pool tracking.
 DROP TRIGGER IF EXISTS entries_after_hours_close ON public.timesheet_entries;
-CREATE TRIGGER entries_after_hours_close
-  AFTER INSERT ON public.timesheet_entries
-  FOR EACH ROW EXECUTE FUNCTION public.after_entry_hours_close();
+DROP FUNCTION IF EXISTS public.after_entry_hours_close();
 
 -- ---------------------------------------------------------------
 -- BOUNDARY RPCs (transactional: validation + audit + mutation together)
@@ -1465,7 +1415,7 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   SELECT public.my_has_role('projects_control') OR public.my_has_role('it');
 $$;
 
--- Create a project of either type.
+-- Create a project. Date-tracked only — hour-pool tracking is retired.
 CREATE OR REPLACE FUNCTION public.create_project(
   p_name TEXT, p_description TEXT, p_tracking_type project_tracking_type,
   p_start DATE, p_end DATE, p_total_hours NUMERIC
@@ -1473,172 +1423,128 @@ CREATE OR REPLACE FUNCTION public.create_project(
 DECLARE v_id UUID;
 BEGIN
   IF NOT public.can_manage_projects() THEN RAISE EXCEPTION 'Not authorized.'; END IF;
-  IF p_tracking_type = 'date' THEN
-    IF p_start IS NULL THEN RAISE EXCEPTION 'A start date is required for a date-tracked project.'; END IF;
-    IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'End date cannot be before start date.'; END IF;
-  ELSE
-    IF p_total_hours IS NULL OR p_total_hours <= 0 THEN RAISE EXCEPTION 'A positive total hour pool is required for an hour-tracked project.'; END IF;
+  IF p_tracking_type IS DISTINCT FROM 'date' THEN
+    RAISE EXCEPTION 'Hour-tracked projects are no longer supported — use date tracking.';
   END IF;
+  IF p_start IS NULL THEN RAISE EXCEPTION 'A start date is required for a date-tracked project.'; END IF;
+  IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'End date cannot be before start date.'; END IF;
 
   INSERT INTO public.projects (name, description, tracking_type, start_date, end_date, total_hours, created_by)
-  VALUES (
-    p_name, NULLIF(trim(p_description), ''), p_tracking_type,
-    CASE WHEN p_tracking_type = 'date' THEN p_start END,
-    CASE WHEN p_tracking_type = 'date' THEN p_end   END,
-    CASE WHEN p_tracking_type = 'hours' THEN p_total_hours END,
-    auth.uid()
-  ) RETURNING id INTO v_id;
+  VALUES (p_name, NULLIF(trim(p_description), ''), 'date', p_start, p_end, NULL, auth.uid())
+  RETURNING id INTO v_id;
   RETURN v_id;
 END;
 $$;
 
--- Update a project's boundary (end date, hour pool) with audit + validation.
+-- Update a project's boundary (dates) with audit + validation.
 CREATE OR REPLACE FUNCTION public.update_project_boundary(
   p_project UUID, p_start DATE, p_end DATE, p_total_hours NUMERIC
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_p public.projects%ROWTYPE; v_alloc NUMERIC;
+DECLARE v_p public.projects%ROWTYPE;
 BEGIN
   IF NOT public.can_manage_projects() THEN RAISE EXCEPTION 'Not authorized.'; END IF;
   SELECT * INTO v_p FROM public.projects WHERE id = p_project;
   IF NOT FOUND THEN RAISE EXCEPTION 'Project not found.'; END IF;
 
-  IF v_p.tracking_type = 'date' THEN
-    IF p_start IS NULL THEN RAISE EXCEPTION 'Start date is required.'; END IF;
-    IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'End date cannot be before start date.'; END IF;
-    -- end date cannot precede the latest stage end
-    IF p_end IS NOT NULL AND EXISTS (
-      SELECT 1 FROM public.project_stages WHERE project_id = p_project AND end_date > p_end
-    ) THEN
-      RAISE EXCEPTION 'Project end date cannot be earlier than a stage end date. Adjust the stages first.';
-    END IF;
-    IF v_p.start_date IS DISTINCT FROM p_start THEN
-      INSERT INTO public.project_audit_logs (project_id, changed_by, field, old_value, new_value)
-      VALUES (p_project, auth.uid(), 'project.start_date', v_p.start_date::text, p_start::text);
-    END IF;
-    IF v_p.end_date IS DISTINCT FROM p_end THEN
-      INSERT INTO public.project_audit_logs (project_id, changed_by, field, old_value, new_value)
-      VALUES (p_project, auth.uid(), 'project.end_date', v_p.end_date::text, p_end::text);
-    END IF;
-    UPDATE public.projects SET start_date = p_start, end_date = p_end WHERE id = p_project;
-
-  ELSE
-    IF p_total_hours IS NULL OR p_total_hours <= 0 THEN RAISE EXCEPTION 'Total hours must be positive.'; END IF;
-    SELECT COALESCE(SUM(allocated_hours), 0) INTO v_alloc FROM public.project_stages WHERE project_id = p_project;
-    IF p_total_hours < v_alloc THEN
-      RAISE EXCEPTION 'Total pool (%h) cannot be less than the % h already allocated to stages.', p_total_hours, v_alloc;
-    END IF;
-    IF v_p.total_hours IS DISTINCT FROM p_total_hours THEN
-      INSERT INTO public.project_audit_logs (project_id, changed_by, field, old_value, new_value)
-      VALUES (p_project, auth.uid(), 'project.total_hours', v_p.total_hours::text, p_total_hours::text);
-    END IF;
-    UPDATE public.projects SET total_hours = p_total_hours WHERE id = p_project;
+  IF p_start IS NULL THEN RAISE EXCEPTION 'Start date is required.'; END IF;
+  IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'End date cannot be before start date.'; END IF;
+  -- end date cannot precede the latest stage end
+  IF p_end IS NOT NULL AND EXISTS (
+    SELECT 1 FROM public.project_stages WHERE project_id = p_project AND end_date > p_end
+  ) THEN
+    RAISE EXCEPTION 'Project end date cannot be earlier than a stage end date. Adjust the stages first.';
   END IF;
+  IF v_p.start_date IS DISTINCT FROM p_start THEN
+    INSERT INTO public.project_audit_logs (project_id, changed_by, field, old_value, new_value)
+    VALUES (p_project, auth.uid(), 'project.start_date', v_p.start_date::text, p_start::text);
+  END IF;
+  IF v_p.end_date IS DISTINCT FROM p_end THEN
+    INSERT INTO public.project_audit_logs (project_id, changed_by, field, old_value, new_value)
+    VALUES (p_project, auth.uid(), 'project.end_date', v_p.end_date::text, p_end::text);
+  END IF;
+  UPDATE public.projects
+    SET start_date = p_start, end_date = p_end,
+        -- Clears only once a real end date is actually set — re-saving with
+        -- end_date still NULL should not silently dismiss the review flag.
+        needs_date_review = CASE WHEN p_end IS NOT NULL THEN false ELSE needs_date_review END
+    WHERE id = p_project;
 END;
 $$;
 
--- Create a stage (validates parent-child boundaries / pool).
+-- Create a stage (validates parent-child date boundaries).
 CREATE OR REPLACE FUNCTION public.create_stage(
   p_project UUID, p_name TEXT, p_start DATE, p_end DATE, p_allocated NUMERIC, p_order INT
 ) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_p public.projects%ROWTYPE; v_alloc NUMERIC; v_id UUID;
+DECLARE v_p public.projects%ROWTYPE; v_id UUID;
 BEGIN
   IF NOT public.can_manage_projects() THEN RAISE EXCEPTION 'Not authorized.'; END IF;
   SELECT * INTO v_p FROM public.projects WHERE id = p_project;
   IF NOT FOUND THEN RAISE EXCEPTION 'Project not found.'; END IF;
 
-  IF v_p.tracking_type = 'date' THEN
-    IF p_start IS NULL THEN RAISE EXCEPTION 'A stage start date is required.'; END IF;
-    IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'Stage end date cannot be before its start date.'; END IF;
-    IF v_p.start_date IS NOT NULL AND p_start < v_p.start_date THEN
-      RAISE EXCEPTION 'Stage start (%) is before the project start (%).', p_start, v_p.start_date;
-    END IF;
-    IF v_p.end_date IS NOT NULL AND p_end IS NOT NULL AND p_end > v_p.end_date THEN
-      RAISE EXCEPTION 'Stage end (%) is beyond the project end (%). Extend the project first.', p_end, v_p.end_date;
-    END IF;
-  ELSE
-    IF p_allocated IS NULL OR p_allocated <= 0 THEN RAISE EXCEPTION 'A positive stage hour allocation is required.'; END IF;
-    SELECT COALESCE(SUM(allocated_hours), 0) INTO v_alloc FROM public.project_stages WHERE project_id = p_project;
-    IF v_alloc + p_allocated > v_p.total_hours THEN
-      RAISE EXCEPTION 'Allocation exceeds the unallocated pool (% h remaining).', (v_p.total_hours - v_alloc);
-    END IF;
+  IF p_start IS NULL THEN RAISE EXCEPTION 'A stage start date is required.'; END IF;
+  IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'Stage end date cannot be before its start date.'; END IF;
+  IF v_p.start_date IS NOT NULL AND p_start < v_p.start_date THEN
+    RAISE EXCEPTION 'Stage start (%) is before the project start (%).', p_start, v_p.start_date;
+  END IF;
+  IF v_p.end_date IS NOT NULL AND p_end IS NOT NULL AND p_end > v_p.end_date THEN
+    RAISE EXCEPTION 'Stage end (%) is beyond the project end (%). Extend the project first.', p_end, v_p.end_date;
   END IF;
 
   INSERT INTO public.project_stages (project_id, name, start_date, end_date, allocated_hours, order_index, created_by)
-  VALUES (
-    p_project, p_name,
-    CASE WHEN v_p.tracking_type = 'date' THEN p_start END,
-    CASE WHEN v_p.tracking_type = 'date' THEN p_end   END,
-    CASE WHEN v_p.tracking_type = 'hours' THEN p_allocated END,
-    COALESCE(p_order, 0), auth.uid()
-  ) RETURNING id INTO v_id;
+  VALUES (p_project, p_name, p_start, p_end, NULL, COALESCE(p_order, 0), auth.uid())
+  RETURNING id INTO v_id;
   RETURN v_id;
 END;
 $$;
 
--- Update a stage boundary (dates / hours) with audit, shrink-guard and
--- optional auto-extend of the parent project's end date.
+-- Update a stage boundary (dates) with audit, and optional auto-extend of
+-- the parent project's end date.
 CREATE OR REPLACE FUNCTION public.update_stage_boundary(
   p_stage UUID, p_start DATE, p_end DATE, p_allocated NUMERIC, p_confirm_extend BOOLEAN
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_s public.project_stages%ROWTYPE; v_p public.projects%ROWTYPE;
-  v_alloc NUMERIC; v_logged NUMERIC;
 BEGIN
   IF NOT public.can_manage_projects() THEN RAISE EXCEPTION 'Not authorized.'; END IF;
   SELECT * INTO v_s FROM public.project_stages WHERE id = p_stage;
   IF NOT FOUND THEN RAISE EXCEPTION 'Stage not found.'; END IF;
   SELECT * INTO v_p FROM public.projects WHERE id = v_s.project_id;
 
-  IF v_p.tracking_type = 'date' THEN
-    IF p_start IS NULL THEN RAISE EXCEPTION 'A stage start date is required.'; END IF;
-    IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'Stage end date cannot be before its start date.'; END IF;
-    IF v_p.start_date IS NOT NULL AND p_start < v_p.start_date THEN
-      RAISE EXCEPTION 'Stage start (%) is before the project start (%).', p_start, v_p.start_date;
-    END IF;
-    -- Extending beyond the project end: allow only with confirmation, then push project end out.
-    IF p_end IS NOT NULL AND v_p.end_date IS NOT NULL AND p_end > v_p.end_date THEN
-      IF NOT COALESCE(p_confirm_extend, false) THEN
-        RAISE EXCEPTION 'CONFIRM_EXTEND: this extends the stage beyond the project end (%). Confirm to push the project deadline to %.', v_p.end_date, p_end;
-      END IF;
-      INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
-      VALUES (v_p.id, p_stage, auth.uid(), 'project.end_date', v_p.end_date::text, p_end::text);
-      UPDATE public.projects SET end_date = p_end WHERE id = v_p.id;
-    END IF;
-    IF v_s.start_date IS DISTINCT FROM p_start THEN
-      INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
-      VALUES (v_p.id, p_stage, auth.uid(), 'stage.start_date', v_s.start_date::text, p_start::text);
-    END IF;
-    IF v_s.end_date IS DISTINCT FROM p_end THEN
-      INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
-      VALUES (v_p.id, p_stage, auth.uid(), 'stage.end_date', v_s.end_date::text, p_end::text);
-    END IF;
-    UPDATE public.project_stages
-      SET start_date = p_start, end_date = p_end,
-          -- re-open if the new end is in the future again
-          tracking_state = CASE WHEN p_end IS NULL OR p_end >= CURRENT_DATE THEN 'active' ELSE tracking_state END,
-          soft_closed_at = CASE WHEN p_end IS NULL OR p_end >= CURRENT_DATE THEN NULL ELSE soft_closed_at END
-      WHERE id = p_stage;
-
-  ELSE
-    IF p_allocated IS NULL OR p_allocated <= 0 THEN RAISE EXCEPTION 'A positive stage hour allocation is required.'; END IF;
-    v_logged := public.stage_logged_hours(p_stage);
-    IF p_allocated < v_logged THEN
-      RAISE EXCEPTION 'Cannot shrink allocation to % h: % h are already logged against this stage.', p_allocated, v_logged;
-    END IF;
-    SELECT COALESCE(SUM(allocated_hours), 0) INTO v_alloc
-    FROM public.project_stages WHERE project_id = v_p.id AND id <> p_stage;
-    IF v_alloc + p_allocated > v_p.total_hours THEN
-      RAISE EXCEPTION 'Allocation exceeds the unallocated pool (% h remaining).', (v_p.total_hours - v_alloc);
-    END IF;
-    IF v_s.allocated_hours IS DISTINCT FROM p_allocated THEN
-      INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
-      VALUES (v_p.id, p_stage, auth.uid(), 'stage.allocated_hours', v_s.allocated_hours::text, p_allocated::text);
-    END IF;
-    UPDATE public.project_stages
-      SET allocated_hours = p_allocated,
-          tracking_state = CASE WHEN p_allocated > v_logged THEN 'active' ELSE tracking_state END,
-          soft_closed_at = CASE WHEN p_allocated > v_logged THEN NULL ELSE soft_closed_at END
-      WHERE id = p_stage;
+  IF p_start IS NULL THEN RAISE EXCEPTION 'A stage start date is required.'; END IF;
+  IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'Stage end date cannot be before its start date.'; END IF;
+  IF v_p.start_date IS NOT NULL AND p_start < v_p.start_date THEN
+    RAISE EXCEPTION 'Stage start (%) is before the project start (%).', p_start, v_p.start_date;
   END IF;
+  -- Extending beyond the project end: allow only with confirmation, then push project end out.
+  IF p_end IS NOT NULL AND v_p.end_date IS NOT NULL AND p_end > v_p.end_date THEN
+    IF NOT COALESCE(p_confirm_extend, false) THEN
+      RAISE EXCEPTION 'CONFIRM_EXTEND: this extends the stage beyond the project end (%). Confirm to push the project deadline to %.', v_p.end_date, p_end;
+    END IF;
+    INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
+    VALUES (v_p.id, p_stage, auth.uid(), 'project.end_date', v_p.end_date::text, p_end::text);
+    UPDATE public.projects SET end_date = p_end WHERE id = v_p.id;
+  END IF;
+  IF v_s.start_date IS DISTINCT FROM p_start THEN
+    INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
+    VALUES (v_p.id, p_stage, auth.uid(), 'stage.start_date', v_s.start_date::text, p_start::text);
+  END IF;
+  IF v_s.end_date IS DISTINCT FROM p_end THEN
+    INSERT INTO public.project_audit_logs (project_id, stage_id, changed_by, field, old_value, new_value)
+    VALUES (v_p.id, p_stage, auth.uid(), 'stage.end_date', v_s.end_date::text, p_end::text);
+  END IF;
+  UPDATE public.project_stages
+    SET start_date = p_start, end_date = p_end,
+        -- re-open if the new end is in the future again
+        tracking_state = CASE WHEN p_end IS NULL OR p_end >= CURRENT_DATE THEN 'active' ELSE tracking_state END,
+        soft_closed_at = CASE WHEN p_end IS NULL OR p_end >= CURRENT_DATE THEN NULL ELSE soft_closed_at END
+    WHERE id = p_stage;
+
+  -- Setting a real end date on every stage clears the parent project's review flag.
+  UPDATE public.projects pr SET needs_date_review = false
+   WHERE pr.id = v_p.id AND pr.needs_date_review
+     AND NOT EXISTS (
+       SELECT 1 FROM public.project_stages st
+        WHERE st.project_id = pr.id AND st.end_date IS NULL AND NOT st.is_archived
+     );
 END;
 $$;

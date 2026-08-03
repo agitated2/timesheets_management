@@ -3,9 +3,9 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, Tooltip,
-  XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend, ReferenceLine
+  XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend,
 } from 'recharts'
-import { format, subDays, addDays, eachDayOfInterval, isWeekend, parseISO } from 'date-fns'
+import { format, subDays, eachDayOfInterval, isWeekend, parseISO } from 'date-fns'
 import { Download, Filter, BarChart2, TrendingUp, ChevronDown, Check } from 'lucide-react'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
@@ -148,26 +148,19 @@ function ProjectInsights({ dark }) {
   }, [projectId])
 
   const project = projects.find(p => p.id === projectId)
-  const isHours = project?.tracking_type === 'hours'
 
-  // Department (discipline) filter applies to the logged-hours charts.
+  // Discipline filter applies to the logged-hours charts.
   const shownEntries = useMemo(
     () => deptFilter.length ? entries.filter(e => deptFilter.includes(e.discipline_id)) : entries,
     [entries, deptFilter]
   )
   const deptOptions = useMemo(() => disciplines.map(d => ({ value: d.id, label: d.name })), [disciplines])
 
-  // 1. Estimated vs actual per stage
-  const estActual = useMemo(() => stages.filter(s => !s.is_archived).map(s => {
-    const logged = Number(s.logged_hours || 0)
-    const alloc  = Number(s.allocated_hours || 0)
-    return {
-      name: s.name,
-      budget: alloc,
-      used: alloc ? Math.min(logged, alloc) : logged,
-      over: alloc ? Math.max(0, logged - alloc) : 0,
-    }
-  }), [stages])
+  // 1. Actual hours logged per stage
+  const actualHours = useMemo(() => stages.filter(s => !s.is_archived).map(s => ({
+    name: s.name,
+    hours: Number(s.logged_hours || 0),
+  })), [stages])
 
   // 2. Workforce by discipline (per-entry discipline the work was logged under)
   const byDiscipline = useMemo(() => {
@@ -179,23 +172,15 @@ function ProjectInsights({ dark }) {
     return Object.entries(acc).map(([name, hours]) => ({ name, hours: Math.round(hours * 100) / 100 })).sort((a, b) => b.hours - a.hours)
   }, [shownEntries])
 
-  // 3. Burn-down + 14-day forecast
-  const { burn, cap, forecast, totalLogged } = useMemo(() => {
+  // 3. Cumulative hours logged over time
+  const { burn, totalLogged } = useMemo(() => {
     const byDate = {}
     shownEntries.forEach(e => { const d = e.timesheets?.date; if (d) byDate[d] = (byDate[d] || 0) + (Number(e.hours_decimal) || 0) })
     const dates = Object.keys(byDate).sort()
     let cum = 0
     const series = dates.map(d => { cum += byDate[d]; return { date: format(parseISO(d), 'MMM d'), cumulative: Math.round(cum * 100) / 100 } })
-    const capVal = isHours ? Number(project?.total_hours || 0) : null
-    const since = format(subDays(new Date(), 14), 'yyyy-MM-dd')
-    const last14 = shownEntries.filter(e => (e.timesheets?.date || '') >= since).reduce((s, e) => s + (Number(e.hours_decimal) || 0), 0)
-    const rate = last14 / 14
-    let fc = null
-    if (isHours && capVal && rate > 0 && cum < capVal) {
-      fc = format(addDays(new Date(), Math.ceil((capVal - cum) / rate)), 'MMM d, yyyy')
-    }
-    return { burn: series, cap: capVal, forecast: fc, totalLogged: Math.round(cum * 100) / 100 }
-  }, [shownEntries, isHours, project])
+    return { burn: series, totalLogged: Math.round(cum * 100) / 100 }
+  }, [shownEntries])
 
   const tip = { contentStyle: { background: dark ? '#1F2937' : '#FFF', border: 'none', borderRadius: 12, fontSize: 12 } }
 
@@ -205,17 +190,14 @@ function ProjectInsights({ dark }) {
         <label className="text-sm font-medium">Project</label>
         <select value={projectId} onChange={e => setProjectId(e.target.value)} className="input text-sm max-w-xs">
           {projects.length === 0 && <option value="">No projects</option>}
-          {projects.map(p => <option key={p.id} value={p.id}>{p.name} ({p.tracking_type === 'hours' ? 'hours' : 'dates'})</option>)}
+          {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        <label className="text-sm font-medium">Department</label>
+        <label className="text-sm font-medium">Discipline</label>
         <div className="min-w-[180px]">
-          <MultiSelectDropdown options={deptOptions} value={deptFilter} onChange={setDeptFilter} placeholder="All departments" />
+          <MultiSelectDropdown options={deptOptions} value={deptFilter} onChange={setDeptFilter} placeholder="All disciplines" />
         </div>
-        {isHours && (
-          <span className="text-xs text-gray-500 ml-auto">
-            {totalLogged}h logged of {Number(project?.total_hours || 0)}h pool
-            {forecast && <> · <span className="text-amber-600 dark:text-amber-400">pool empties ~{forecast}</span></>}
-          </span>
+        {project && (
+          <span className="text-xs text-gray-500 ml-auto">{totalLogged}h logged</span>
         )}
       </div>
 
@@ -228,21 +210,18 @@ function ProjectInsights({ dark }) {
         <div className="card p-12 text-center text-gray-500">No project selected.</div>
       ) : (
         <>
-          {/* 1. Estimated vs actual */}
+          {/* 1. Actual hours logged per stage */}
           <div className="card p-5">
             <h2 className="font-semibold text-sm mb-4 flex items-center gap-2">
-              <BarChart2 size={16} className="text-blue-500" /> Estimated vs actual hours by stage
+              <BarChart2 size={16} className="text-blue-500" /> Actual hours logged by stage
             </h2>
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={estActual} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
+              <BarChart data={actualHours} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} />
                 <XAxis dataKey="name" tick={{ fontSize: 11, fill: axisColor(dark) }} />
                 <YAxis tick={{ fontSize: 11, fill: axisColor(dark) }} />
-                <Tooltip {...tip} formatter={(v, n) => [v + 'h', n]} />
-                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-                {isHours && <Bar dataKey="budget" name="Budget" fill="#9CA3AF" radius={[4, 4, 0, 0]} />}
-                <Bar dataKey="used" name="Actual" stackId="a" fill="#3B82F6" radius={isHours ? [0, 0, 0, 0] : [4, 4, 0, 0]} />
-                <Bar dataKey="over" name="Over budget" stackId="a" fill="#EF4444" radius={[4, 4, 0, 0]} />
+                <Tooltip {...tip} formatter={(v) => [v + 'h', 'Hours']} />
+                <Bar dataKey="hours" name="Hours" fill="#3B82F6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -266,10 +245,10 @@ function ProjectInsights({ dark }) {
               )}
             </div>
 
-            {/* 3. Burn-down */}
+            {/* 3. Cumulative hours logged */}
             <div className="card p-5">
               <h2 className="font-semibold text-sm mb-4 flex items-center gap-2">
-                <TrendingUp size={16} className="text-blue-500" /> Hour burn-down
+                <TrendingUp size={16} className="text-blue-500" /> Cumulative hours logged
               </h2>
               {burn.length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-16">No logged hours yet.</p>
@@ -278,14 +257,12 @@ function ProjectInsights({ dark }) {
                   <LineChart data={burn} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} />
                     <XAxis dataKey="date" tick={{ fontSize: 11, fill: axisColor(dark) }} interval={Math.max(0, Math.floor(burn.length / 7))} />
-                    <YAxis tick={{ fontSize: 11, fill: axisColor(dark) }} domain={[0, cap ? Math.max(cap, ...burn.map(b => b.cumulative)) : 'auto']} />
+                    <YAxis tick={{ fontSize: 11, fill: axisColor(dark) }} />
                     <Tooltip {...tip} formatter={(v) => [v + 'h', 'Cumulative']} />
-                    {cap ? <ReferenceLine y={cap} stroke="#EF4444" strokeDasharray="4 4" label={{ value: `Pool ${cap}h`, fontSize: 10, fill: '#EF4444', position: 'insideTopRight' }} /> : null}
                     <Line type="monotone" dataKey="cumulative" stroke="#3B82F6" strokeWidth={2.5} dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
               )}
-              {forecast && <p className="text-xs text-gray-400 mt-2">Forecast (14-day rate): hour pool exhausts around <strong className="text-amber-600 dark:text-amber-400">{forecast}</strong>.</p>}
             </div>
           </div>
         </>

@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
-  Briefcase, Plus, Search, ChevronDown, ChevronUp, Calendar,
+  Briefcase, Plus, Search, ChevronDown, ChevronUp,
   Users, Pencil, Check, X, AlertTriangle, ChevronLeft,
   ChevronRight, ScrollText, CalendarDays, Download, Archive,
   UserPlus, Trash2, FolderPlus,
@@ -109,41 +109,35 @@ function ErrorBox({ msg }) {
 function CreateProjectModal({ onClose, onCreated }) {
   const [name, setName]         = useState('')
   const [desc, setDesc]         = useState('')
-  const [trackingType, setType] = useState('date')   // 'date' | 'hours'
   const [projStart, setProjStart] = useState('')
   const [projEnd, setProjEnd]     = useState('')
-  const [totalHours, setTotalHours] = useState('')
   const [stageName, setStageName] = useState('Phase 1')
   const [stageStart, setStageStart] = useState('')
   const [stageEnd, setStageEnd]     = useState('')
-  const [stageHours, setStageHours] = useState('')
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState('')
-
-  const isHours = trackingType === 'hours'
 
   async function handleCreate(e) {
     e.preventDefault()
     setError('')
     if (!name.trim()) { setError('Project name is required.'); return }
-    if (!isHours && !projStart) { setError('A project start date is required.'); return }
-    if (isHours && (!totalHours || Number(totalHours) <= 0)) { setError('A positive total hour pool is required.'); return }
+    if (!projStart) { setError('A project start date is required.'); return }
     setLoading(true)
 
     const { data: projId, error: pErr } = await supabase.rpc('create_project', {
-      p_name: name.trim(), p_description: desc, p_tracking_type: trackingType,
-      p_start: !isHours ? projStart : null,
-      p_end:   !isHours ? (projEnd || null) : null,
-      p_total_hours: isHours ? Number(totalHours) : null,
+      p_name: name.trim(), p_description: desc, p_tracking_type: 'date',
+      p_start: projStart,
+      p_end:   projEnd || null,
+      p_total_hours: null,
     })
     if (pErr) { setError(pErr.message); setLoading(false); return }
 
     if (stageName.trim()) {
       const { error: sErr } = await supabase.rpc('create_stage', {
         p_project: projId, p_name: stageName.trim(),
-        p_start: !isHours ? (stageStart || projStart) : null,
-        p_end:   !isHours ? (stageEnd || projEnd || null) : null,
-        p_allocated: isHours ? Number(stageHours || totalHours) : null,
+        p_start: stageStart || projStart,
+        p_end:   stageEnd || projEnd || null,
+        p_allocated: null,
         p_order: 0,
       })
       if (sErr) { setError(`Project created, but the first stage failed: ${sErr.message}`); setLoading(false); onCreated(); return }
@@ -164,29 +158,10 @@ function CreateProjectModal({ onClose, onCreated }) {
           <textarea value={desc} onChange={e => setDesc(e.target.value)} className="input min-h-[70px] resize-none" placeholder="Optional project description" />
         </Field>
 
-        <Field label="Tracking type *" hint="Locked once the project is created.">
-          <div className="flex gap-2">
-            {[['date', 'By dates', Calendar], ['hours', 'By hours', ScrollText]].map(([v, lbl, Icon]) => (
-              <button type="button" key={v} onClick={() => setType(v)}
-                className={clsx('flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium border transition-colors',
-                  trackingType === v ? 'bg-ae7-red text-white border-ae7-red'
-                    : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800')}>
-                <Icon size={14} /> {lbl}
-              </button>
-            ))}
-          </div>
-        </Field>
-
-        {!isHours ? (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Project start *"><input type="date" value={projStart} onChange={e => setProjStart(e.target.value)} className="input text-sm" required /></Field>
-            <Field label="Project end"><input type="date" value={projEnd} min={projStart || undefined} onChange={e => setProjEnd(e.target.value)} className="input text-sm" /></Field>
-          </div>
-        ) : (
-          <Field label="Total hour pool *" hint="Total hours allocated to the entire contract.">
-            <input type="number" min="0" step="0.5" value={totalHours} onChange={e => setTotalHours(e.target.value)} className="input text-sm" placeholder="e.g. 2000" required />
-          </Field>
-        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Project start *"><input type="date" value={projStart} onChange={e => setProjStart(e.target.value)} className="input text-sm" required /></Field>
+          <Field label="Project end"><input type="date" value={projEnd} min={projStart || undefined} onChange={e => setProjEnd(e.target.value)} className="input text-sm" /></Field>
+        </div>
 
         <div className="border-t border-gray-100 dark:border-gray-800 pt-4">
           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">First stage</p>
@@ -194,19 +169,11 @@ function CreateProjectModal({ onClose, onCreated }) {
             <Field label="Stage name">
               <input type="text" value={stageName} onChange={e => setStageName(e.target.value)} className="input" placeholder="Phase 1" />
             </Field>
-            {!isHours ? (
-              <>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Start date"><input type="date" value={stageStart} onChange={e => setStageStart(e.target.value)} className="input text-sm" /></Field>
-                  <Field label="End date"><input type="date" value={stageEnd} min={stageStart || undefined} onChange={e => setStageEnd(e.target.value)} className="input text-sm" /></Field>
-                </div>
-                <p className="text-xs text-gray-400">Defaults to the project dates. End dates can be set later.</p>
-              </>
-            ) : (
-              <Field label="Stage hours" hint="Carved out of the project pool. Defaults to the full pool.">
-                <input type="number" min="0" step="0.5" value={stageHours} onChange={e => setStageHours(e.target.value)} className="input text-sm" placeholder={totalHours || 'e.g. 500'} />
-              </Field>
-            )}
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Start date"><input type="date" value={stageStart} onChange={e => setStageStart(e.target.value)} className="input text-sm" /></Field>
+              <Field label="End date"><input type="date" value={stageEnd} min={stageStart || undefined} onChange={e => setStageEnd(e.target.value)} className="input text-sm" /></Field>
+            </div>
+            <p className="text-xs text-gray-400">Defaults to the project dates. End dates can be set later.</p>
           </div>
         </div>
 
@@ -227,28 +194,22 @@ function AddStageModal({ project, onClose, onCreated }) {
   const [name, setName]       = useState('')
   const [startDate, setStart] = useState('')
   const [endDate, setEnd]     = useState('')
-  const [hours, setHours]     = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
   const nextIndex = (project.project_stages?.length || 0)
-
-  const isHours = project.tracking_type === 'hours'
-  const allocated = (project.project_stages || []).reduce((s, st) => s + (Number(st.allocated_hours) || 0), 0)
-  const remaining = Number(project.total_hours || 0) - allocated
 
   async function handleAdd(e) {
     e.preventDefault()
     setError('')
     if (!name.trim()) { setError('Stage name is required.'); return }
-    if (isHours && (!hours || Number(hours) <= 0)) { setError('A positive hour allocation is required.'); return }
-    if (!isHours && !startDate) { setError('A stage start date is required.'); return }
+    if (!startDate) { setError('A stage start date is required.'); return }
     setLoading(true)
 
     const { error: sErr } = await supabase.rpc('create_stage', {
       p_project: project.id, p_name: name.trim(),
-      p_start: !isHours ? startDate : null,
-      p_end:   !isHours ? (endDate || null) : null,
-      p_allocated: isHours ? Number(hours) : null,
+      p_start: startDate,
+      p_end:   endDate || null,
+      p_allocated: null,
       p_order: nextIndex,
     })
     if (sErr) { setError(sErr.message); setLoading(false); return }
@@ -264,19 +225,11 @@ function AddStageModal({ project, onClose, onCreated }) {
         <Field label="Stage name *">
           <input type="text" value={name} onChange={e => setName(e.target.value)} className="input" placeholder="e.g. Construction Documents" required autoFocus />
         </Field>
-        {isHours ? (
-          <Field label="Stage hours *" hint={`${remaining}h unallocated remaining in the pool.`}>
-            <input type="number" min="0" step="0.5" max={remaining} value={hours} onChange={e => setHours(e.target.value)} className="input text-sm" placeholder={`max ${remaining}`} required />
-          </Field>
-        ) : (
-          <>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Start date *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
-              <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
-            </div>
-            <p className="text-xs text-gray-400">Must fall within the project timeline. End date can be set later.</p>
-          </>
-        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start date *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
+          <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
+        </div>
+        <p className="text-xs text-gray-400">Must fall within the project timeline. End date can be set later.</p>
         <ErrorBox msg={error} />
         <div className="flex gap-3 pt-1">
           <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
@@ -289,12 +242,10 @@ function AddStageModal({ project, onClose, onCreated }) {
   )
 }
 
-// ── Edit Stage Modal (dates or hours; transactional via RPC) ──────
-function EditStageModal({ stage, project, onClose, onDone }) {
-  const isHours = project.tracking_type === 'hours'
+// ── Edit Stage Modal (dates; transactional via RPC) ───────────────
+function EditStageModal({ stage, onClose, onDone }) {
   const [startDate, setStart] = useState(stage.start_date || '')
   const [endDate, setEnd]     = useState(stage.end_date || '')
-  const [hours, setHours]     = useState(stage.allocated_hours ?? '')
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
   const [confirmExtend, setConfirmExtend] = useState(null)  // pending message
@@ -303,9 +254,9 @@ function EditStageModal({ stage, project, onClose, onDone }) {
     setLoading(true); setError('')
     const { error: err } = await supabase.rpc('update_stage_boundary', {
       p_stage: stage.id,
-      p_start: !isHours ? (startDate || null) : null,
-      p_end:   !isHours ? (endDate || null) : null,
-      p_allocated: isHours ? Number(hours) : null,
+      p_start: startDate || null,
+      p_end:   endDate || null,
+      p_allocated: null,
       p_confirm_extend: !!confirm,
     })
     setLoading(false)
@@ -322,16 +273,10 @@ function EditStageModal({ stage, project, onClose, onDone }) {
   return (
     <Modal title={`Edit stage — ${stage.name}`} icon={<Pencil size={15} className="text-ae7-red" />} onClose={onClose}>
       <form onSubmit={e => { e.preventDefault(); submit(false) }} className="p-6 space-y-4">
-        {isHours ? (
-          <Field label="Stage hours *" hint={`${Number(stage.logged_hours || 0)}h already logged — allocation can't go below that.`}>
-            <input type="number" min="0" step="0.5" value={hours} onChange={e => setHours(e.target.value)} className="input text-sm" required />
-          </Field>
-        ) : (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Start date *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
-            <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
-          </div>
-        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start date *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
+          <Field label="End date"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
+        </div>
 
         {confirmExtend && (
           <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-md px-3 py-2.5 text-xs text-amber-700 dark:text-amber-400 space-y-2">
@@ -356,10 +301,8 @@ function EditStageModal({ stage, project, onClose, onDone }) {
 
 // ── Edit Project Boundary Modal ──────────────────────────────────
 function EditProjectModal({ project, onClose, onDone }) {
-  const isHours = project.tracking_type === 'hours'
   const [startDate, setStart] = useState(project.start_date || '')
   const [endDate, setEnd]     = useState(project.end_date || '')
-  const [total, setTotal]     = useState(project.total_hours ?? '')
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
 
@@ -368,9 +311,9 @@ function EditProjectModal({ project, onClose, onDone }) {
     setLoading(true); setError('')
     const { error: err } = await supabase.rpc('update_project_boundary', {
       p_project: project.id,
-      p_start: !isHours ? (startDate || null) : null,
-      p_end:   !isHours ? (endDate || null) : null,
-      p_total_hours: isHours ? Number(total) : null,
+      p_start: startDate || null,
+      p_end:   endDate || null,
+      p_total_hours: null,
     })
     setLoading(false)
     if (err) { setError(err.message); return }
@@ -380,16 +323,10 @@ function EditProjectModal({ project, onClose, onDone }) {
   return (
     <Modal title={`Edit project — ${project.name}`} icon={<Pencil size={15} className="text-ae7-red" />} onClose={onClose}>
       <form onSubmit={handleSubmit} className="p-6 space-y-4">
-        {isHours ? (
-          <Field label="Total hour pool *" hint="Cannot drop below the hours already allocated to stages.">
-            <input type="number" min="0" step="0.5" value={total} onChange={e => setTotal(e.target.value)} className="input text-sm" required />
-          </Field>
-        ) : (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Project start *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
-            <Field label="Project end"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
-          </div>
-        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Project start *"><input type="date" value={startDate} onChange={e => setStart(e.target.value)} className="input text-sm" required /></Field>
+          <Field label="Project end"><input type="date" value={endDate} min={startDate || undefined} onChange={e => setEnd(e.target.value)} className="input text-sm" /></Field>
+        </div>
         <ErrorBox msg={error} />
         <div className="flex gap-3 pt-1">
           <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
@@ -591,17 +528,11 @@ const STAGE_STATE = {
   active:      { label: 'Active',      cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' },
   not_started: { label: 'Not started', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
   ended:       { label: 'Ended',       cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' },
-  pool_full:   { label: 'Pool used',   cls: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
 }
 
 function StageRow({ stage, project, onEditStage, onArchiveStage, readonly }) {
-  const isHours = project.tracking_type === 'hours'
-  const state   = stage.effective_state || stage.tracking_state || 'active'
-  const sc      = STAGE_STATE[state] || STAGE_STATE.active
-  const logged  = Number(stage.logged_hours || 0)
-  const alloc   = Number(stage.allocated_hours || 0)
-  const over    = isHours && alloc > 0 && logged > alloc
-  const pct     = isHours && alloc > 0 ? Math.min(100, (logged / alloc) * 100) : 0
+  const state = stage.effective_state || stage.tracking_state || 'active'
+  const sc    = STAGE_STATE[state] || STAGE_STATE.active
 
   return (
     <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-gray-50 dark:bg-gray-800/40 flex-wrap">
@@ -609,26 +540,13 @@ function StageRow({ stage, project, onEditStage, onArchiveStage, readonly }) {
         <p className="text-sm font-medium flex items-center gap-2 flex-wrap">
           {stage.name}
           <span className={clsx('text-xs px-2 py-0.5 rounded-full', sc.cls)}>{sc.label}</span>
-          {over && <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">Over budget</span>}
         </p>
-        {isHours ? (
-          <div className="mt-1.5 max-w-xs">
-            <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
-              <span><ScrollText size={11} className="inline mr-1" />{logged}h / {alloc}h</span>
-              <span>{alloc > 0 ? Math.round((logged / alloc) * 100) : 0}%</span>
-            </div>
-            <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
-              <div className={clsx('h-full rounded-full', over ? 'bg-red-500' : 'bg-ae7-red')} style={{ width: `${pct}%` }} />
-            </div>
-          </div>
-        ) : (
-          <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1">
-            <CalendarDays size={11} />
-            {formatDate(stage.start_date) || <span className="italic">Start not set</span>}
-            <span className="mx-0.5">→</span>
-            {formatDate(stage.end_date) || <span className="italic">End not set</span>}
-          </p>
-        )}
+        <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1">
+          <CalendarDays size={11} />
+          {formatDate(stage.start_date) || <span className="italic">Start not set</span>}
+          <span className="mx-0.5">→</span>
+          {formatDate(stage.end_date) || <span className="italic">End not set</span>}
+        </p>
       </div>
       {!readonly && (
         <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -655,12 +573,7 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onE
   const stages         = allStages.filter(s => !s.is_archived)
   const archivedStages = allStages.filter(s => s.is_archived)
   const isArchived     = project.status === 'archived'
-  const isHours        = project.tracking_type === 'hours'
-  const totalAlloc     = allStages.reduce((s, st) => s + (Number(st.allocated_hours) || 0), 0)
-  const totalLogged    = allStages.reduce((s, st) => s + (Number(st.logged_hours) || 0), 0)
-  const metaLabel      = isHours
-    ? `Hours · ${totalLogged}/${project.total_hours ?? 0}h logged · ${Math.max(0, (project.total_hours ?? 0) - totalAlloc)}h unallocated`
-    : `Dates · ${formatDate(project.start_date) || '—'} → ${formatDate(project.end_date) || 'ongoing'}`
+  const metaLabel      = `${formatDate(project.start_date) || '—'} → ${formatDate(project.end_date) || 'ongoing'}`
 
   return (
     <div className={clsx('card overflow-hidden', isArchived && 'opacity-60')}>
@@ -675,9 +588,11 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onE
           <div className="min-w-0">
             <p className="font-semibold text-sm truncate flex items-center gap-2">
               {project.name}
-              <span className={clsx('text-[10px] px-1.5 py-0.5 rounded-full font-medium', isHours ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300' : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300')}>
-                {isHours ? 'Hours' : 'Dates'}
-              </span>
+              {project.needs_date_review && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                  Dates need review
+                </span>
+              )}
             </p>
             <p className="text-xs text-gray-400 truncate">
               {stages.length} {stages.length === 1 ? 'stage' : 'stages'} · {members.length} {members.length === 1 ? 'member' : 'members'} · {metaLabel}
@@ -754,7 +669,7 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onE
                 onClick={() => onEditProject(project)}
                 className="text-xs text-gray-500 hover:text-ae7-red flex items-center gap-1 transition-colors"
               >
-                <Pencil size={12} /> Edit {isHours ? 'hour pool' : 'timeline'}
+                <Pencil size={12} /> Edit timeline
               </button>
               <button
                 onClick={() => onArchive(project)}
@@ -887,7 +802,7 @@ export default function ProjectsPage() {
         .from('projects')
         .select(`
           id, name, description, status, created_at,
-          tracking_type, start_date, end_date, total_hours,
+          tracking_type, start_date, end_date, total_hours, needs_date_review,
           project_members (
             id, employee_id,
             profiles!employee_id (id, full_name, email)

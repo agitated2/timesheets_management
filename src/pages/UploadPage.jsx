@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { canLogToStage, poolFit, isStageSelectable } from '../lib/projectRules'
+import { canLogToStage, isStageSelectable } from '../lib/projectRules'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
@@ -158,11 +158,7 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
       case 'stage_not_started':
         return { title: `Stage "${v.stage}" hasn’t opened yet`, body: `This stage starts on ${v.startDate ?? 'a later date'}. Contact your line manager.` }
       case 'stage_ended':
-        return { title: `Stage "${v.stage}" has ended`, body: `This stage ended on ${v.endDate ?? 'its end date'}. You can only log work dated on or before that.` }
-      case 'stage_pool_full':
-        return { title: `Stage "${v.stage}" pool is used up`, body: 'The full hour pool for this stage has been logged. Contact your line manager for an extension.' }
-      case 'stage_pool_exceeded':
-        return { title: `Stage "${v.stage}" has only ${v.remaining}h left`, body: `Reduce your hours on this stage to ${v.remaining}h, or contact your line manager for an extension.` }
+        return { title: `Stage "${v.stage}" has ended`, body: `This stage ended on ${v.endDate ?? 'its end date'}. You can only log work dated on or before that, unless the stage is extended.` }
       default:
         return { title: 'Project issue', body: 'Contact your line manager.' }
     }
@@ -481,41 +477,29 @@ function InAppEntry({ profile, onBack, onSuccess }) {
     ))
   }
 
-  function ruleStage(stage, proj) {
+  function ruleStage(stage) {
     return {
-      trackingType:   proj?.tracking_type,
-      allocatedHours: Number(stage.allocated_hours || 0),
-      loggedHours:    Number(stage.logged_hours || 0),
-      startDate:      stage.start_date,
-      endDate:        stage.end_date,
+      startDate: stage.start_date,
+      endDate:   stage.end_date,
     }
   }
 
-  // Blocking issue: stage not open / ended / pool exhausted, or an entry that
-  // would exceed the remaining hour pool (must be reduced or extended).
+  // Blocking issue: stage not open yet, or ended (unless extended).
   function getStageWarning(entry, date) {
     if (!entry.projectId || !entry.stageId || !date) return null
     const proj  = projects.find(p => p.id === entry.projectId)
     const stage = proj?.project_stages?.find(s => s.id === entry.stageId)
     if (!stage) return null
-    const rs = ruleStage(stage, proj)
+    const rs = ruleStage(stage)
 
     const verdict = canLogToStage(rs, date)
     if (!verdict.ok) {
       if (verdict.reason === 'not_started')
         return `Stage "${stage.name}" hasn't opened yet — contact your line manager.`
       if (verdict.reason === 'ended')
-        return `Stage "${stage.name}" ended on ${stage.end_date}. You can only log work dated on or before that.`
-      if (verdict.reason === 'pool_full')
-        return `Stage "${stage.name}" has used its full hour pool — contact your line manager for an extension.`
+        return `Stage "${stage.name}" ended on ${stage.end_date}. You can only log work dated on or before that, unless the stage is extended.`
       return `Stage "${stage.name}" can't be logged for this date.`
     }
-
-    // Hours: the entry must fit the remaining pool.
-    const hrs = calcHours(entry.timeFrom, entry.timeTo) || 0
-    const fit = poolFit(rs, hrs)
-    if (!fit.fits)
-      return `Only ${fit.remaining}h remain in "${stage.name}". Reduce this entry to ${fit.remaining}h or contact your line manager for an extension.`
 
     return null
   }
@@ -750,11 +734,8 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
     ? [...(selectedProject.project_stages || [])]
         .filter(s => !s.is_archived)
         .filter(s => isStageSelectable({
-          trackingType:   selectedProject.tracking_type,
-          allocatedHours: Number(s.allocated_hours || 0),
-          loggedHours:    Number(s.logged_hours || 0),
-          startDate:      s.start_date,
-          endDate:        s.end_date,
+          startDate: s.start_date,
+          endDate:   s.end_date,
         }, date))
         .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
     : []
