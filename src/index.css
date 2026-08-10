@@ -135,6 +135,7 @@
 @media (prefers-reduced-motion: reduce) {
   .skeleton::after { animation: none; }
   .page-enter { animation: none; }
+  .animate-slide-in-right { animation: none; }
   .theme-transition,
   .theme-transition *,
   .theme-transition *::before,

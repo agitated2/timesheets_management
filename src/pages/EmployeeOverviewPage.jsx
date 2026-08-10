@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import {
-  Users, Search, ChevronDown, ChevronRight, Briefcase, CalendarDays, Check, Layers, Plus, Minus,
+  Users, Search, Eye, CalendarDays, Check, Layers, Plus, Minus, Building2,
 } from 'lucide-react'
 import Pagination from '../components/Pagination'
 import EmployeeCalendarModal from '../components/EmployeeCalendarModal'
+import Modal from '../components/Modal'
+import MultiSelect from '../components/MultiSelect'
 import clsx from 'clsx'
+import { format, parseISO } from 'date-fns'
 import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
@@ -82,84 +85,143 @@ function DisciplineEditor({ employeeId, current, disciplines, onSaved }) {
   )
 }
 
-function EmployeeRow({ emp, projects, balances, calendarName, categories, disciplines, discName, canManage, onChanged, onOpenCalendar }) {
-  const [open, setOpen] = useState(false)
-  const balByCat = new Map(balances.map(b => [b.category_id, b]))
+// ── Inline joining-date editor for one employee ────────────────────
+// Drives the anniversary-based leave cycle (see HR Policies) — changing
+// this changes when that employee's leave balance next resets.
+function JoiningDateEditor({ employeeId, current, onSaved }) {
+  const [value, setValue] = useState(current || '')
+  const [saving, setSaving] = useState(false)
+
+  async function save(next) {
+    setSaving(true)
+    const { error } = await supabase.rpc('set_joining_date', { p_employees: [employeeId], p_date: next || null })
+    setSaving(false)
+    if (error) { alert(error.message); return }
+    onSaved()
+  }
 
   return (
-    <div>
-      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center gap-3 px-5 py-3.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
-        {open ? <ChevronDown size={15} className="text-gray-400 flex-shrink-0" /> : <ChevronRight size={15} className="text-gray-400 flex-shrink-0" />}
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium truncate">{emp.full_name || emp.email}</p>
-          <p className="text-xs text-gray-400 truncate">{emp.email}</p>
-        </div>
-        <span className="hidden lg:flex items-center gap-1 text-xs text-gray-500 max-w-[160px] truncate"><Layers size={12} className="flex-shrink-0" /> {discName || '—'}</span>
-        <span className="hidden sm:flex items-center gap-1 text-xs text-gray-500"><Briefcase size={12} /> {projects.length}</span>
-        <span className="hidden md:flex items-center gap-1 text-xs text-gray-500"><CalendarDays size={12} /> {calendarName}</span>
-      </button>
+    <input
+      type="date" value={value} disabled={saving}
+      onChange={e => { setValue(e.target.value); save(e.target.value) }}
+      className="input text-sm py-1 max-w-[160px]"
+    />
+  )
+}
 
-      {open && (
-        <div className="bg-gray-50 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800 px-5 py-4 grid md:grid-cols-3 gap-5">
-          <div className="md:col-span-3 flex flex-wrap items-center gap-4">
-            <button onClick={() => onOpenCalendar(emp)} className="btn-secondary text-sm">
-              <CalendarDays size={14} /> Monthly calendar
-            </button>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Discipline</span>
-              {canManage ? (
-                <DisciplineEditor employeeId={emp.id} current={emp.discipline_id} disciplines={disciplines} onSaved={onChanged} />
-              ) : (
-                <span className="text-sm">{discName || '—'}</span>
-              )}
-            </div>
-          </div>
-          {/* Projects */}
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Projects</p>
-            {projects.length === 0 ? (
-              <p className="text-xs text-gray-400">None assigned</p>
+function EmployeeRow({ emp, discName, officeName, onOpenDetail, onOpenCalendar }) {
+  return (
+    <div className="flex items-center gap-3 px-5 py-3 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium truncate">{emp.full_name || emp.email}</p>
+        <p className="text-xs text-gray-400 truncate">{emp.email}</p>
+      </div>
+      <span className="hidden sm:flex items-center gap-1 text-xs text-gray-500 max-w-[160px] truncate"><Layers size={12} className="flex-shrink-0" /> {discName || '—'}</span>
+      <span className="hidden md:flex items-center gap-1 text-xs text-gray-500 max-w-[140px] truncate"><Building2 size={12} className="flex-shrink-0" /> {officeName || '—'}</span>
+      <div className="flex items-center gap-1 flex-shrink-0">
+        <button
+          onClick={() => onOpenDetail(emp)} title="View details"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-ae7-red hover:bg-ae7-light dark:hover:bg-ae7-red/10 transition-colors"
+        >
+          <Eye size={15} />
+        </button>
+        <button
+          onClick={() => onOpenCalendar(emp)} title="Monthly calendar"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/20 transition-colors"
+        >
+          <CalendarDays size={15} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Detail modal: everything that used to be inline in the accordion ──
+function EmployeeDetailModal({ emp, projects, balances, calendarName, officeName, categories, disciplines, discName, canManage, onChanged, onClose }) {
+  const balByCat = new Map(balances.map(b => [b.category_id, b]))
+  // Categories are per-office now — only show the employee's own office's
+  // categories, not every office the viewer (e.g. an IT admin) can see.
+  const paidCategories = categories.filter(c => c.is_paid && c.office_id === emp.office_id)
+
+  return (
+    <Modal
+      title={emp.full_name || emp.email}
+      icon={<Users size={16} className="text-ae7-red" />}
+      onClose={onClose}
+      wide
+    >
+      <div className="p-6 space-y-5">
+        <p className="text-xs text-gray-400 -mt-3">{emp.email}</p>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Discipline</span>
+            {canManage ? (
+              <DisciplineEditor employeeId={emp.id} current={emp.discipline_id} disciplines={disciplines} onSaved={onChanged} />
             ) : (
-              <ul className="space-y-1">
-                {projects.map((p, i) => <li key={i} className="text-sm">{p}</li>)}
-              </ul>
+              <span className="text-sm">{discName || '—'}</span>
             )}
           </div>
-
-          {/* Leave balances */}
-          <div className="md:col-span-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Leave allowances (days)</p>
-            <div className="space-y-1.5">
-              {categories.filter(c => c.is_paid).map(c => {
-                const b = balByCat.get(c.id)
-                return (
-                  <div key={c.id} className="flex items-center justify-between gap-3 text-sm">
-                    <span className="min-w-0 truncate">{c.name}</span>
-                    <div className="flex items-center gap-3 flex-shrink-0">
-                      {b ? (
-                        <span className="text-xs text-right leading-tight">
-                          <span className="block text-gray-700 dark:text-gray-300 tabular-nums font-medium">{Number(b.remaining)} available</span>
-                          <span className="block text-gray-400 tabular-nums">{Number(b.used)} taken · {Number(b.allowance)} total</span>
-                        </span>
-                      ) : (
-                        <span className="text-gray-500 text-xs">—</span>
-                      )}
-                      {canManage && (
-                        <AllowanceEditor employeeId={emp.id} category={c} onSaved={onChanged} />
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-              {categories.filter(c => c.is_paid).length === 0 && (
-                <p className="text-xs text-gray-400">No paid leave categories defined.</p>
-              )}
-            </div>
-            <p className="text-xs text-gray-400 mt-3">Calendar: <span className="text-gray-600 dark:text-gray-300">{calendarName}</span></p>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Joining date</span>
+            {canManage ? (
+              <JoiningDateEditor employeeId={emp.id} current={emp.joining_date} onSaved={onChanged} />
+            ) : (
+              <span className="text-sm">{emp.joining_date ? format(parseISO(emp.joining_date), 'MMM d, yyyy') : '—'}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Office</span>
+            <span className="text-sm">{officeName || '—'}</span>
+            {canManage && <span className="text-xs text-gray-400">(change in IT Panel → Offices)</span>}
           </div>
         </div>
-      )}
-    </div>
+
+        {/* Projects */}
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Projects</p>
+          {projects.length === 0 ? (
+            <p className="text-xs text-gray-400">None assigned</p>
+          ) : (
+            <ul className="space-y-1">
+              {projects.map((p, i) => <li key={i} className="text-sm">{p}</li>)}
+            </ul>
+          )}
+        </div>
+
+        {/* Leave balances */}
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Leave allowances (days)</p>
+          <div className="space-y-1.5">
+            {paidCategories.map(c => {
+              const b = balByCat.get(c.id)
+              return (
+                <div key={c.id} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="min-w-0 truncate">{c.name}</span>
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    {b ? (
+                      <span className="text-xs text-right leading-tight">
+                        <span className="block text-gray-700 dark:text-gray-300 tabular-nums font-medium">{Number(b.remaining)} available</span>
+                        <span className="block text-gray-400 tabular-nums">{Number(b.used)} taken · {Number(b.allowance)} total</span>
+                      </span>
+                    ) : (
+                      <span className="text-gray-500 text-xs">—</span>
+                    )}
+                    {canManage && (
+                      <AllowanceEditor employeeId={emp.id} category={c} onSaved={onChanged} />
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+            {paidCategories.length === 0 && (
+              <p className="text-xs text-gray-400">No paid leave categories defined.</p>
+            )}
+          </div>
+          <p className="text-xs text-gray-400 mt-3">Calendar: <span className="text-gray-600 dark:text-gray-300">{calendarName}</span></p>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -174,18 +236,23 @@ export default function EmployeeOverviewPage() {
   const [defaultCal, setDefaultCal] = useState('Company Default')
   const [categories, setCategories] = useState([])
   const [disciplines, setDisciplines] = useState([])
+  const [offices, setOffices] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [officeFilter, setOfficeFilter] = useState([])
   const [page, setPage] = useState(1)
   const [calendarFor, setCalendarFor] = useState(null)
+  const [detailFor, setDetailFor] = useState(null)
 
   const load = useCallback(async () => {
-    const [profs, members, bals, assigns, cals, cats, disc] = await Promise.all([
-      supabase.from('profiles').select('id, full_name, email, discipline_id').order('full_name'),
+    const [profs, members, bals, cals, offs, cats, disc] = await Promise.all([
+      supabase.from('profiles').select('id, full_name, email, discipline_id, joining_date, office_id').order('full_name'),
       supabase.from('project_members').select('employee_id, projects(name)'),
       supabase.from('leave_balance_summary').select('*'),
-      supabase.from('calendar_assignments').select('employee_id, calendar_id'),
-      supabase.from('holiday_calendars').select('id, name, is_default'),
+      // Calendars are tied 1:1 to an office now (see migration_v10); resolved
+      // below via each employee's office_id, matching emp_calendar() server-side.
+      supabase.from('holiday_calendars').select('id, name, is_default, office_id'),
+      supabase.from('offices').select('id, name').order('name'),
       supabase.from('leave_categories').select('*').eq('is_active', true).order('name'),
       supabase.from('disciplines').select('id, name, is_active').order('name'),
     ])
@@ -193,8 +260,9 @@ export default function EmployeeOverviewPage() {
     setEmployees(profs.data || [])
     setCategories(cats.data || [])
     setDisciplines(disc.data || [])
+    setOffices(offs.data || [])
 
-    const calNameById = new Map((cals.data || []).map(c => [c.id, c.name]))
+    const calByOffice = new Map((cals.data || []).filter(c => c.office_id).map(c => [c.office_id, c.name]))
     const def = (cals.data || []).find(c => c.is_default)
     setDefaultCal(def?.name || 'Company Default')
 
@@ -213,7 +281,7 @@ export default function EmployeeOverviewPage() {
     setBalByEmp(b)
 
     const c = {}
-    ;(assigns.data || []).forEach(r => { c[r.employee_id] = calNameById.get(r.calendar_id) })
+    ;(profs.data || []).forEach(e => { c[e.id] = calByOffice.get(e.office_id) || def?.name || 'Company Default' })
     setCalByEmp(c)
 
     setLoading(false)
@@ -222,15 +290,30 @@ export default function EmployeeOverviewPage() {
   useEffect(() => { load() }, [load])
 
   const discNameById = useMemo(() => new Map(disciplines.map(d => [d.id, d.name])), [disciplines])
+  const officeNameById = useMemo(() => new Map(offices.map(o => [o.id, o.name])), [offices])
+
+  // Options are just whichever offices the (already RLS-scoped) employee
+  // list actually references — no separate visibility check needed, and
+  // no dead options that would only ever filter to zero rows.
+  const officeFilterOptions = useMemo(() => {
+    const usedIds = new Set(employees.map(e => e.office_id))
+    return offices.filter(o => usedIds.has(o.id)).map(o => ({ value: o.id, label: o.name }))
+  }, [offices, employees])
 
   const q = search.trim().toLowerCase()
-  const filtered = useMemo(() => employees.filter(e =>
-    !q || (e.full_name || '').toLowerCase().includes(q) || (e.email || '').toLowerCase().includes(q)
-  ), [employees, q])
+  const filtered = useMemo(() => employees.filter(e => {
+    if (officeFilter.length && !officeFilter.includes(e.office_id)) return false
+    return !q || (e.full_name || '').toLowerCase().includes(q) || (e.email || '').toLowerCase().includes(q)
+  }), [employees, q, officeFilter])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const current = Math.min(page, totalPages)
   const shown = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
+
+  // Looked up live (rather than snapshotting the row at open time) so inline
+  // edits inside the modal — discipline, joining date, balances — reflect
+  // immediately after `load()` re-runs.
+  const detailEmp = detailFor ? employees.find(e => e.id === detailFor) : null
 
   return (
     <div className="space-y-6">
@@ -239,18 +322,27 @@ export default function EmployeeOverviewPage() {
         <p className="page-subtitle">Everyone in the company — projects, leave allowances, and calendars.</p>
       </div>
 
-      <div className="relative">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-        <input value={search} onChange={e => { setSearch(e.target.value); setPage(1) }} className="input pl-9" placeholder="Search by name or email…" />
+      <div className={clsx('grid gap-3', officeFilterOptions.length > 1 ? 'sm:grid-cols-[1fr_260px]' : '')}>
+        <div className="relative">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input value={search} onChange={e => { setSearch(e.target.value); setPage(1) }} className="input pl-9" placeholder="Search by name or email…" />
+        </div>
+        {officeFilterOptions.length > 1 && (
+          <MultiSelect
+            options={officeFilterOptions}
+            value={officeFilter}
+            onChange={v => { setOfficeFilter(v); setPage(1) }}
+            placeholder="All offices"
+          />
+        )}
       </div>
 
       <div className="card overflow-hidden">
         <div className="hidden sm:flex items-center gap-3 px-5 py-2.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
-          <span className="w-[15px]" />
           <span className="flex-1">Employee</span>
-          <span className="hidden lg:flex items-center gap-1 max-w-[160px]"><Layers size={12} /> Discipline</span>
-          <span className="flex items-center gap-1"><Briefcase size={12} /> Projects</span>
-          <span className="hidden md:flex items-center gap-1"><CalendarDays size={12} /> Calendar</span>
+          <span className="hidden sm:flex items-center gap-1 max-w-[160px]"><Layers size={12} /> Discipline</span>
+          <span className="hidden md:flex items-center gap-1 max-w-[140px]"><Building2 size={12} /> Office</span>
+          <span className="w-[62px] text-right">Actions</span>
         </div>
         {loading ? (
           <SkeletonList rows={6} />
@@ -265,14 +357,9 @@ export default function EmployeeOverviewPage() {
               <EmployeeRow
                 key={emp.id}
                 emp={emp}
-                projects={membersByEmp[emp.id] || []}
-                balances={balByEmp[emp.id] || []}
-                calendarName={calByEmp[emp.id] || defaultCal}
-                categories={categories}
-                disciplines={disciplines}
                 discName={discNameById.get(emp.discipline_id)}
-                canManage={canManage}
-                onChanged={load}
+                officeName={officeNameById.get(emp.office_id)}
+                onOpenDetail={e => setDetailFor(e.id)}
                 onOpenCalendar={setCalendarFor}
               />
             ))}
@@ -283,6 +370,22 @@ export default function EmployeeOverviewPage() {
 
       {calendarFor && (
         <EmployeeCalendarModal employee={calendarFor} onClose={() => setCalendarFor(null)} />
+      )}
+
+      {detailEmp && (
+        <EmployeeDetailModal
+          emp={detailEmp}
+          projects={membersByEmp[detailEmp.id] || []}
+          balances={balByEmp[detailEmp.id] || []}
+          calendarName={calByEmp[detailEmp.id] || defaultCal}
+          officeName={officeNameById.get(detailEmp.office_id)}
+          categories={categories}
+          disciplines={disciplines}
+          discName={discNameById.get(detailEmp.discipline_id)}
+          canManage={canManage}
+          onChanged={load}
+          onClose={() => setDetailFor(null)}
+        />
       )}
     </div>
   )

@@ -6,6 +6,9 @@ import { Hourglass, CheckSquare, XCircle, Search, ArrowRight, ChevronUp, Chevron
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
+import Pagination from '../components/Pagination'
+
+const PAGE_SIZE = 10
 
 const statusCfg = {
   pending:  { label: 'Pending',  icon: Hourglass,   cls: 'text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-400' },
@@ -41,9 +44,10 @@ export default function ReviewsPage() {
   const { profile } = useAuth()
   const [timesheets, setTimesheets] = useState([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState('pending')
+  const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState({ key: 'date', dir: 'desc' })
+  const [page, setPage] = useState(1)
 
   function toggleSort(key) {
     setSort(prev => prev.key === key
@@ -72,7 +76,7 @@ export default function ReviewsPage() {
 
   const statusOrder = { pending: 0, approved: 1, rejected: 2 }
 
-  const shown = timesheets
+  const filtered = timesheets
     .filter(t => filter === 'all' || t.status === filter)
     .filter(t => {
       if (!search) return true
@@ -104,6 +108,13 @@ export default function ReviewsPage() {
       return sort.dir === 'asc' ? cmp : -cmp
     })
 
+  const totalPages  = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const shown       = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+
+  function handleSearch(v) { setSearch(v); setPage(1) }
+  function handleFilter(f) { setFilter(f); setPage(1) }
+
   return (
     <div className="space-y-6">
       <div>
@@ -119,16 +130,16 @@ export default function ReviewsPage() {
           <input
             type="text"
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => handleSearch(e.target.value)}
             className="input pl-9"
             placeholder="Search employee name or email…"
           />
         </div>
         <div className="flex gap-2">
-          {['pending', 'approved', 'rejected', 'all'].map(f => (
+          {['all', 'pending', 'approved', 'rejected'].map(f => (
             <button
               key={f}
-              onClick={() => setFilter(f)}
+              onClick={() => handleFilter(f)}
               className={clsx(
                 'px-3 py-2 rounded-md text-sm font-medium transition-colors capitalize',
                 filter === f
@@ -195,6 +206,7 @@ export default function ReviewsPage() {
               )
             })}
           </div>
+          <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} total={filtered.length} />
         </div>
       )}
     </div>

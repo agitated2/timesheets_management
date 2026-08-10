@@ -11,6 +11,7 @@ import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
 
 const PAGE_SIZE = 10
+const APPROVALS_PAGE_SIZE = 5
 
 export const LEAVE_STATUS = {
   pending_manager: { label: 'Pending manager', icon: Hourglass,   cls: 'text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-400' },
@@ -79,11 +80,19 @@ function NewRequestModal({ categories, onClose, onSubmitted }) {
           <h2 className="font-semibold text-sm">New request</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
         </div>
+        {categories.length === 0 ? (
+          <div className="p-6 space-y-4">
+            <div className="flex items-start gap-2 text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 rounded-xl px-3 py-2.5">
+              <AlertTriangle size={15} className="flex-shrink-0 mt-0.5" />
+              Your office doesn't have any leave categories set up yet. Ask HR to add one before submitting a request.
+            </div>
+            <button onClick={onClose} className="btn-secondary w-full">Close</button>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           <div>
             <label className="label">Category *</label>
             <select value={categoryId} onChange={e => setCategoryId(e.target.value)} className="input" required>
-              {categories.length === 0 && <option value="">No categories available</option>}
               {categories.map(c => (
                 <option key={c.id} value={c.id}>{c.name}{c.is_paid ? '' : ' (unpaid)'}</option>
               ))}
@@ -159,6 +168,7 @@ function NewRequestModal({ categories, onClose, onSubmitted }) {
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   )
@@ -229,7 +239,10 @@ export default function RequestsPage() {
 
   const load = useCallback(async () => {
     const [cats, reqs] = await Promise.all([
-      supabase.from('leave_categories').select('*').eq('is_active', true).order('name'),
+      // Only the employee's own office's categories — submit_leave_request()
+      // enforces this server-side too, but the picker should never offer an
+      // option it would then reject.
+      supabase.from('leave_categories').select('*').eq('is_active', true).eq('office_id', profile.office_id).order('name'),
       supabase.from('leave_requests')
         .select('*, leave_categories(name, is_paid)')
         .eq('employee_id', profile.id)
@@ -257,9 +270,9 @@ export default function RequestsPage() {
     load()
   }
 
-  const apprTotalPages = Math.max(1, Math.ceil(approvals.length / PAGE_SIZE))
+  const apprTotalPages = Math.max(1, Math.ceil(approvals.length / APPROVALS_PAGE_SIZE))
   const apprCurrent    = Math.min(apprPage, apprTotalPages)
-  const apprShown      = approvals.slice((apprCurrent - 1) * PAGE_SIZE, apprCurrent * PAGE_SIZE)
+  const apprShown      = approvals.slice((apprCurrent - 1) * APPROVALS_PAGE_SIZE, apprCurrent * APPROVALS_PAGE_SIZE)
 
   const mineTotalPages = Math.max(1, Math.ceil(requests.length / PAGE_SIZE))
   const mineCurrent    = Math.min(minePage, mineTotalPages)
@@ -278,17 +291,30 @@ export default function RequestsPage() {
       </div>
 
       {/* Manager approval queue */}
-      {isManager && approvals.length > 0 && (
+      {isManager && (
         <div className="card overflow-hidden">
           <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center gap-2">
             <Inbox size={15} className="text-gray-400" />
             <h2 className="font-semibold text-sm">Pending your approval</h2>
-            <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full">{approvals.length}</span>
+            {approvals.length > 0 && (
+              <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full">{approvals.length}</span>
+            )}
           </div>
-          <div className="divide-y divide-gray-100 dark:divide-gray-800">
-            {apprShown.map(r => <ApprovalCard key={r.id} req={r} onDecided={load} />)}
-          </div>
-          <Pagination page={apprCurrent} totalPages={apprTotalPages} onChange={setApprPage} total={approvals.length} />
+          {loading ? (
+            <SkeletonList rows={3} />
+          ) : approvals.length === 0 ? (
+            <div className="text-center py-10">
+              <Inbox size={32} className="text-gray-300 dark:text-gray-700 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">No requests waiting on you.</p>
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                {apprShown.map(r => <ApprovalCard key={r.id} req={r} onDecided={load} />)}
+              </div>
+              <Pagination page={apprCurrent} totalPages={apprTotalPages} onChange={setApprPage} total={approvals.length} />
+            </>
+          )}
         </div>
       )}
 

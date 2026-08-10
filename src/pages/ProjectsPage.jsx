@@ -787,6 +787,7 @@ export default function ProjectsPage() {
   const [search, setSearch]       = useState('')
   const [expanded, setExpanded]   = useState(null)
   const [toast, setToast]         = useState('')
+  const [loadError, setLoadError] = useState('')
 
   // Modals
   const [showCreate, setShowCreate]     = useState(false)
@@ -797,7 +798,7 @@ export default function ProjectsPage() {
   const [showImport, setShowImport]     = useState(false)
 
   const loadProjects = useCallback(async () => {
-    const [{ data: projs }, { data: stages }] = await Promise.all([
+    const [{ data: projs, error: projErr }, { data: stages, error: stageErr }] = await Promise.all([
       supabase
         .from('projects')
         .select(`
@@ -812,6 +813,8 @@ export default function ProjectsPage() {
       // computed view: effective_state + logged_hours per stage
       supabase.from('project_stages_view').select('*').order('order_index'),
     ])
+    const err = projErr || stageErr
+    setLoadError(err ? err.message : '')
     const byProject = {}
     ;(stages || []).forEach(s => { (byProject[s.project_id] ||= []).push(s) })
     const merged = (projs || []).map(p => ({ ...p, project_stages: byProject[p.id] || [] }))
@@ -912,6 +915,8 @@ export default function ProjectsPage() {
               <Plus size={15} /> New project
             </button>
           </div>
+
+          {loadError && <ErrorBox msg={`Couldn't load projects: ${loadError}`} />}
 
           {loading ? (
             <div className="card overflow-hidden"><SkeletonList rows={6} /></div>

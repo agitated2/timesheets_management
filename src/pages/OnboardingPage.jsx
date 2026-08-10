@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { UserCircle, Search, CheckCircle } from 'lucide-react'
+import { UserCircle, Search, CheckCircle, Building2 } from 'lucide-react'
 
 export default function OnboardingPage() {
   const { user, profile, refreshProfile } = useAuth()
@@ -11,6 +11,7 @@ export default function OnboardingPage() {
   const [fullName, setFullName]           = useState(profile?.full_name || '')
   const [disciplineId, setDisciplineId]   = useState(profile?.discipline_id || '')
   const [disciplines, setDisciplines]     = useState([])
+  const [officeName, setOfficeName]       = useState('')
   const [managers, setManagers]           = useState([])
   const [managerSearch, setManagerSearch] = useState('')
   const [selectedManager, setSelectedManager] = useState(null)
@@ -31,6 +32,12 @@ export default function OnboardingPage() {
       .order('name')
       .then(({ data }) => setDisciplines(data ?? []))
   }, [])
+
+  useEffect(() => {
+    if (!profile?.office_id) return
+    supabase.from('offices').select('name').eq('id', profile.office_id).single()
+      .then(({ data }) => setOfficeName(data?.name || ''))
+  }, [profile?.office_id])
 
   const filteredManagers = managers.filter(m => {
     const q = managerSearch.toLowerCase()
@@ -90,6 +97,13 @@ export default function OnboardingPage() {
                 autoFocus
               />
             </div>
+
+            {officeName && (
+              <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 rounded-xl px-3 py-2.5">
+                <Building2 size={15} className="flex-shrink-0" />
+                Office: <span className="font-medium text-gray-700 dark:text-gray-300">{officeName}</span>
+              </div>
+            )}
 
             <div>
               <label className="label" htmlFor="discipline">Discipline</label>

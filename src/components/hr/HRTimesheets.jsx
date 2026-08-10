@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../lib/supabase'
-import { FileText, Download, ChevronDown, ChevronRight, Filter } from 'lucide-react'
+import { FileText, Download, ChevronDown, ChevronRight, Filter, Building2 } from 'lucide-react'
 import { format, parseISO, startOfMonth } from 'date-fns'
 import MultiSelect from '../MultiSelect'
 import clsx from 'clsx'
 import { SkeletonList } from '../Skeleton'
+import TimesheetPreview from '../TimesheetPreview'
+import { formatInOfficeTime } from '../../lib/datetime'
 
 const PAGE_SIZE = 10
 
@@ -17,7 +19,6 @@ const statusBadge = {
 function entryProjectName(e)    { return e.projects?.name || e.project_name || '—' }
 function entryStageName(e)      { return e.project_stages?.name || null }
 function entryDisciplineName(e) { return e.disciplines?.name || null }
-function formatStamp(iso)       { return format(new Date(iso), 'MMM d, yyyy h:mm a') }
 
 async function downloadFile(filePath) {
   if (!filePath || filePath === 'inapp') { alert('No original file for in-app entries.'); return }
@@ -31,28 +32,33 @@ async function downloadFile(filePath) {
 
 function EntryTable({ entries }) {
   return (
-    <div className="bg-gray-50 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800">
-      <div className="hidden sm:grid grid-cols-6 gap-3 px-5 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-        <span>Time</span><span>Hours</span><span>Project</span><span>Stage</span><span>Discipline</span><span>Task</span>
-      </div>
-      <div className="divide-y divide-gray-100 dark:divide-gray-800/60">
-        {entries.map((e, i) => (
-          <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-6 gap-2 px-5 py-2.5 text-sm">
-            <span className="font-mono text-xs text-gray-500">{e.time_from ?? '—'}–{e.time_to ?? '—'}</span>
-            <span className="font-semibold tabular-nums">{e.hours_decimal != null ? `${e.hours_decimal}h` : '—'}</span>
-            <span className="font-medium truncate">{entryProjectName(e)}</span>
-            <span className="text-gray-500 truncate">{entryStageName(e) || '—'}</span>
-            <span className="text-gray-500 truncate">{entryDisciplineName(e) || '—'}</span>
-            <span className="text-gray-400 truncate">{e.task || '—'}</span>
-          </div>
-        ))}
-      </div>
+    <div className="bg-gray-50 dark:bg-gray-800/40 border-t border-gray-100 dark:border-gray-800 animate-slide-down">
+      <TimesheetPreview
+        collapsible
+        nested
+        showTotal={false}
+        emptyLabel="No entries"
+        entries={entries.map(e => ({
+          time_from:       e.time_from,
+          time_to:         e.time_to,
+          hours_decimal:   e.hours_decimal,
+          project_name:    entryProjectName(e),
+          stage_name:      entryStageName(e),
+          discipline_name: entryDisciplineName(e),
+          task:            e.task,
+        }))}
+      />
     </div>
   )
 }
 
-function Row({ label, sub, hours, status, reviewerName, submittedAt, decidedAt, filePath, entries }) {
+function Row({ label, sub, hours, status, reviewerName, submittedAt, decidedAt, filePath, entries, officeName, officeTimezone }) {
   const [open, setOpen] = useState(false)
+  // Office-local, not viewer-local — two HR viewers in different
+  // timezones must see the identical "submitted at" string for the same
+  // row, or "was this late?" gets a different answer depending on who's
+  // asking. See src/lib/datetime.js.
+  const stamp = iso => formatInOfficeTime(iso, officeTimezone)
   return (
     <div>
       <button onClick={() => setOpen(o => !o)} className="w-full flex items-center gap-3 px-5 py-3.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
@@ -61,19 +67,24 @@ function Row({ label, sub, hours, status, reviewerName, submittedAt, decidedAt, 
           <p className="text-sm font-medium truncate">{label}</p>
           <p className="text-xs text-gray-400 truncate">{sub}</p>
           {submittedAt && (
-            <p className="text-xs text-gray-400 truncate">Submitted {formatStamp(submittedAt)}</p>
+            <p className="text-xs text-gray-400 truncate">Submitted {stamp(submittedAt)}</p>
           )}
           {status === 'approved' && (
             <p className="text-xs text-emerald-600 dark:text-emerald-400 truncate">
-              Approved by {reviewerName || '—'}{decidedAt && ` · ${formatStamp(decidedAt)}`}
+              Approved by {reviewerName || '—'}{decidedAt && ` · ${stamp(decidedAt)}`}
             </p>
           )}
           {status === 'rejected' && (
             <p className="text-xs text-red-500 dark:text-red-400 truncate">
-              Rejected by {reviewerName || '—'}{decidedAt && ` · ${formatStamp(decidedAt)}`}
+              Rejected by {reviewerName || '—'}{decidedAt && ` · ${stamp(decidedAt)}`}
             </p>
           )}
         </div>
+        {officeName && (
+          <span className="hidden sm:flex items-center gap-1 text-xs text-gray-400 flex-shrink-0" title="Office">
+            <Building2 size={11} /> {officeName}
+          </span>
+        )}
         {status && <span className={clsx('text-xs font-medium px-2 py-0.5 rounded-full capitalize hidden sm:inline', statusBadge[status])}>{status}</span>}
         <span className="text-sm font-semibold tabular-nums text-gray-600 dark:text-gray-300 flex-shrink-0">{hours}h</span>
         {filePath === 'inapp' ? (
@@ -96,41 +107,76 @@ export default function HRTimesheets() {
   const [empFilter, setEmpFilter]   = useState([])
   const [projFilter, setProjFilter] = useState([])
   const [stageFilter, setStageFilter] = useState([])
+  const [officeFilter, setOfficeFilter] = useState([])
   const [groupBy, setGroupBy] = useState('date')   // 'date' | 'project'
   const [page, setPage]   = useState(1)
 
   const [sheets, setSheets]       = useState([])
   const [projects, setProjects]   = useState([])
   const [employees, setEmployees] = useState([])
+  const [offices, setOffices]     = useState([])
   const [loading, setLoading]     = useState(true)
 
-  // filter option sources
+  // filter option sources. Offices are restricted to what this viewer can
+  // actually see (my_visible_office_ids) — the offices table itself is
+  // readable by any authenticated user (needed for pickers elsewhere like
+  // onboarding), but there's no reason to offer a non-sees_all_offices HR
+  // user a filter option that would only ever return zero rows.
   useEffect(() => {
     Promise.all([
       supabase.from('projects').select('id, name, project_stages(id, name)').order('name'),
-      supabase.from('profiles').select('id, full_name, email').order('full_name'),
-    ]).then(([p, e]) => { setProjects(p.data || []); setEmployees(e.data || []) })
+      supabase.from('profiles').select('id, full_name, email, office_id').order('full_name'),
+      supabase.from('offices').select('id, name, timezone').order('name'),
+      supabase.rpc('my_visible_office_ids'),
+    ]).then(([p, e, o, v]) => {
+      setProjects(p.data || [])
+      setEmployees(e.data || [])
+      const visible = new Set(v.data || [])
+      setOffices((o.data || []).filter(off => visible.has(off.id)))
+    })
   }, [])
+
+  const officeById = useMemo(() => new Map(offices.map(o => [o.id, o])), [offices])
+
+  // Employees whose office matches the office filter — timesheets has no
+  // office_id of its own, so this feeds into the employee_id filter below
+  // rather than being a separate query predicate.
+  const officeEmployeeIds = useMemo(() => {
+    if (!officeFilter.length) return null
+    return employees.filter(e => officeFilter.includes(e.office_id)).map(e => e.id)
+  }, [employees, officeFilter])
 
   const load = useCallback(async () => {
     setLoading(true)
     let q = supabase.from('timesheets')
       .select(`id, date, total_hours, status, file_path, employee_id, reviewer_id, created_at, updated_at,
-               profiles!employee_id(full_name, email),
+               profiles!employee_id(full_name, email, office_id, offices(name, timezone)),
                reviewer:profiles!reviewer_id(full_name, email),
                timesheet_entries(id, time_from, time_to, hours_decimal, project_name, task, project_id, stage_id, discipline_id, projects(name), project_stages(name), disciplines(name))`)
       .order('date', { ascending: false })
     if (from) q = q.gte('date', from)
     if (to)   q = q.lte('date', to)
-    if (empFilter.length) q = q.in('employee_id', empFilter)
+    // Office + employee filters intersect rather than one replacing the
+    // other — picking an office then also picking one of its employees
+    // should narrow further, not reset the office choice. Tracked as
+    // null-vs-array (not .length) so an office whose intersection is
+    // genuinely empty still applies `.in('employee_id', [])` (zero rows)
+    // instead of falling through to "no filter" and showing everything.
+    let effectiveEmpFilter = empFilter.length ? empFilter : null
+    if (officeEmployeeIds) {
+      const officeIdSet = new Set(officeEmployeeIds)
+      effectiveEmpFilter = effectiveEmpFilter ? effectiveEmpFilter.filter(id => officeIdSet.has(id)) : officeEmployeeIds
+    }
+    if (effectiveEmpFilter) q = q.in('employee_id', effectiveEmpFilter)
     const { data } = await q
     setSheets(data || [])
     setLoading(false)
     setPage(1)
-  }, [from, to, empFilter])
+  }, [from, to, empFilter, officeEmployeeIds])
 
   useEffect(() => { load() }, [load])
 
+  const officeOptions = useMemo(() => offices.map(o => ({ value: o.id, label: o.name })), [offices])
   const projectOptions = useMemo(() => projects.map(p => ({ value: p.id, label: p.name })), [projects])
   // Stages are scoped to the selected project(s). With no project selected the
   // stage filter is disabled (there is nothing to scope to). All stages of a
@@ -174,6 +220,8 @@ export default function HRTimesheets() {
         decidedAt: s.status !== 'pending' ? s.updated_at : null,
         filePath: s.file_path,
         entries: s._entries,
+        officeName: s.profiles?.offices?.name,
+        officeTimezone: s.profiles?.offices?.timezone,
       }))
     }
     // group by project: one row per (project, timesheet)
@@ -198,6 +246,8 @@ export default function HRTimesheets() {
           decidedAt: s.status !== 'pending' ? s.updated_at : null,
           filePath: s.file_path,
           entries,
+          officeName: s.profiles?.offices?.name,
+          officeTimezone: s.profiles?.offices?.timezone,
         })
       })
     })
@@ -216,7 +266,16 @@ export default function HRTimesheets() {
           <Filter size={13} /> Filters
         </div>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          <MultiSelect options={employees.map(e => ({ value: e.id, label: e.full_name || e.email, sublabel: e.email }))} value={empFilter} onChange={setEmpFilter} placeholder="All employees" />
+          {offices.length > 1 && (
+            <MultiSelect options={officeOptions} value={officeFilter} onChange={v => { setOfficeFilter(v); setPage(1) }} placeholder="All offices" />
+          )}
+          <MultiSelect
+            options={employees.map(e => ({
+              value: e.id, label: e.full_name || e.email,
+              sublabel: [e.email, officeById.get(e.office_id)?.name].filter(Boolean).join(' · '),
+            }))}
+            value={empFilter} onChange={setEmpFilter} placeholder="All employees"
+          />
           <MultiSelect options={projectOptions} value={projFilter} onChange={v => { setProjFilter(v); setStageFilter([]); setPage(1) }} placeholder="All projects" />
           <MultiSelect options={stageOptions} value={stageFilter} onChange={v => { setStageFilter(v); setPage(1) }} disabled={projFilter.length === 0} placeholder={projFilter.length === 0 ? 'Select a project first' : 'All stages'} />
           <div className="flex items-center gap-2">

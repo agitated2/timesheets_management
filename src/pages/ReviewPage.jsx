@@ -157,6 +157,7 @@ export default function ReviewPage() {
         </div>
         <TimesheetPreview
           emptyLabel="No entries parsed"
+          collapsible
           entries={entries.map(e => ({
             time_from:       e.time_from,
             time_to:         e.time_to,

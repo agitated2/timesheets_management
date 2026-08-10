@@ -132,12 +132,17 @@ CREATE INDEX IF NOT EXISTS idx_profiles_manager_ids ON public.profiles USING gin
 -- TRIGGERS & FUNCTIONS
 -- ---------------------------------------------------------------
 
--- Auto-create profile row on new auth user
+-- Auto-create profile row on new auth user. office_id is NOT NULL (see
+-- the OFFICES section below) so it must be supplied at creation time via
+-- auth user_metadata — create-user.js always passes it. There is no safe
+-- window to backfill office_id after this INSERT: profiles.office_id
+-- being NULL, even briefly, makes that row visible to every office (see
+-- the `o IS NULL` safety valve in can_see_office).
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  INSERT INTO public.profiles (id, email)
-  VALUES (NEW.id, NEW.email)
+  INSERT INTO public.profiles (id, email, office_id)
+  VALUES (NEW.id, NEW.email, NULLIF(NEW.raw_user_meta_data->>'office_id', '')::UUID)
   ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
 END;
@@ -269,6 +274,97 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   );
 $$;
 
+-- ===============================================================
+-- OFFICES (RLS-based multi-tenancy, see migration_v10)
+-- Every profile/project belongs to a home office; visibility of
+-- office-scoped tables is gated by can_see_office() below. IT and
+-- sees_all_offices bypass the restriction entirely. Defined here (before
+-- the PROFILES policies below) because several of them reference
+-- can_see_office(). projects.office_id + the office admin RPCs are added
+-- further down, once the projects table exists.
+-- ===============================================================
+CREATE TABLE IF NOT EXISTS public.offices (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name               TEXT NOT NULL,
+  is_active          BOOLEAN NOT NULL DEFAULT true,
+  -- IANA name; every "today"/"late" decision the reminder job makes is
+  -- computed against this, not the server's or a browser's clock.
+  timezone           TEXT NOT NULL DEFAULT 'Asia/Dubai',
+  timesheet_deadline TIME NOT NULL DEFAULT '18:00',
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_offices_name_lower ON public.offices(lower(name));
+
+-- Validate against pg_timezone_names rather than a CHECK constraint —
+-- that view isn't IMMUTABLE, so Postgres won't allow it in a CHECK.
+CREATE OR REPLACE FUNCTION public.guard_office_timezone()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.timezone IS DISTINCT FROM OLD.timezone THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = NEW.timezone) THEN
+      RAISE EXCEPTION 'Unknown timezone: %', NEW.timezone;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS offices_guard_timezone ON public.offices;
+CREATE TRIGGER offices_guard_timezone BEFORE INSERT OR UPDATE ON public.offices
+  FOR EACH ROW EXECUTE FUNCTION public.guard_office_timezone();
+
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS office_id             UUID REFERENCES public.offices(id),
+  ADD COLUMN IF NOT EXISTS additional_office_ids UUID[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS sees_all_offices      BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_profiles_office ON public.profiles(office_id);
+-- A fresh install has no pre-existing rows to backfill/lock down like the
+-- migration does, but office_id must still end up NOT NULL so no future
+-- row is ever visible to every office.
+ALTER TABLE public.profiles ALTER COLUMN office_id SET NOT NULL;
+
+ALTER TABLE public.offices ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "offices_read" ON public.offices;
+CREATE POLICY "offices_read" ON public.offices
+  FOR SELECT USING (auth.uid() IS NOT NULL);
+-- No direct INSERT/UPDATE policy — writes only via upsert_office() (SECURITY DEFINER).
+
+-- All offices a given user may READ. IT and sees_all_offices get
+-- everything. Generalized to an arbitrary user (not just auth.uid()) so
+-- the reminder job can ask "what can THIS recipient see" the same way RLS
+-- answers it for the caller's own session — my_has_role() is hardcoded to
+-- auth.uid() and can't be reused here, so the roles-array-with-legacy-
+-- role-column fallback is inlined to match it exactly.
+CREATE OR REPLACE FUNCTION public.visible_office_ids_for(p_user UUID)
+RETURNS UUID[] LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT CASE
+    WHEN p.sees_all_offices
+      OR (CASE WHEN cardinality(p.roles) > 0 THEN 'it' = ANY(p.roles) ELSE p.role = 'it' END)
+      THEN ARRAY(SELECT id FROM public.offices)
+    ELSE ARRAY[p.office_id] || p.additional_office_ids
+  END
+  FROM public.profiles p WHERE p.id = p_user;
+$$;
+
+-- STABLE matters: the planner evaluates the array once per statement, so
+-- `= ANY(...)` in can_see_office costs about the same as plain equality.
+CREATE OR REPLACE FUNCTION public.my_visible_office_ids()
+RETURNS UUID[] LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT public.visible_office_ids_for(auth.uid());
+$$;
+
+CREATE OR REPLACE FUNCTION public.can_see_office(o UUID)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT o IS NULL OR o = ANY(public.my_visible_office_ids());
+$$;
+
+-- Caller's home office (see migration_v11) — used as the leave_categories
+-- office_id default so a direct client INSERT without an explicit office
+-- lands in the creator's own office rather than failing NOT NULL.
+CREATE OR REPLACE FUNCTION public.my_office_id()
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT office_id FROM public.profiles WHERE id = auth.uid();
+$$;
+
 -- ---- PROFILES ----
 
 -- All authenticated users can see manager/c_suite profiles (for onboarding + settings dropdown)
@@ -277,6 +373,7 @@ CREATE POLICY "profiles_read_for_manager_select" ON public.profiles
   FOR SELECT USING (
     auth.uid() IS NOT NULL
     AND ('manager' = ANY(roles) OR 'c_suite' = ANY(roles))
+    AND public.can_see_office(office_id)
   );
 
 -- Users can read their own profile
@@ -287,13 +384,14 @@ CREATE POLICY "profiles_read_own" ON public.profiles
 -- Managers/C-Suite can read their subordinates
 DROP POLICY IF EXISTS "profiles_read_subordinates" ON public.profiles;
 CREATE POLICY "profiles_read_subordinates" ON public.profiles
-  FOR SELECT USING (auth.uid() = ANY(manager_ids));
+  FOR SELECT USING (auth.uid() = ANY(manager_ids) AND public.can_see_office(office_id));
 
 -- HR/C-Suite/IT can read all profiles
 DROP POLICY IF EXISTS "profiles_read_privileged" ON public.profiles;
 CREATE POLICY "profiles_read_privileged" ON public.profiles
   FOR SELECT USING (
-    public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it')
+    (public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it'))
+    AND public.can_see_office(office_id)
   );
 
 -- Users can update their own profile
@@ -304,7 +402,7 @@ CREATE POLICY "profiles_update_own" ON public.profiles
 -- Global analytics can read all profiles (needed to populate employee list)
 DROP POLICY IF EXISTS "profiles_read_global_analytics" ON public.profiles;
 CREATE POLICY "profiles_read_global_analytics" ON public.profiles
-  FOR SELECT USING (public.my_has_role('global_analytics'));
+  FOR SELECT USING (public.my_has_role('global_analytics') AND public.can_see_office(office_id));
 
 -- IT can update any profile (role management)
 DROP POLICY IF EXISTS "profiles_update_it" ON public.profiles;
@@ -329,19 +427,25 @@ CREATE POLICY "timesheets_read_manager" ON public.timesheets
   FOR SELECT USING (
     (public.my_has_role('manager') OR public.my_has_role('c_suite'))
     AND public.i_manage(employee_id)
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
   );
 
 CREATE POLICY "timesheets_read_privileged" ON public.timesheets
   FOR SELECT USING (
-    public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it')
+    (public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it'))
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
   );
 
 CREATE POLICY "timesheets_read_global_analytics" ON public.timesheets
-  FOR SELECT USING (public.my_has_role('global_analytics'));
+  FOR SELECT USING (
+    public.my_has_role('global_analytics')
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
+  );
 
 CREATE POLICY "timesheets_read_team_analytics" ON public.timesheets
   FOR SELECT USING (
     public.my_has_role('team_analytics') AND public.i_manage(employee_id)
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
   );
 
 CREATE POLICY "timesheets_insert_own" ON public.timesheets
@@ -375,24 +479,38 @@ CREATE POLICY "entries_read_manager" ON public.timesheet_entries
     (public.my_has_role('manager') OR public.my_has_role('c_suite'))
     AND timesheet_id IN (
       SELECT t.id FROM public.timesheets t
-      WHERE public.i_manage(t.employee_id)
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.i_manage(t.employee_id) AND public.can_see_office(pr.office_id)
     )
   );
 
 CREATE POLICY "entries_read_privileged" ON public.timesheet_entries
   FOR SELECT USING (
-    public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it')
+    (public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it'))
+    AND timesheet_id IN (
+      SELECT t.id FROM public.timesheets t
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.can_see_office(pr.office_id)
+    )
   );
 
 CREATE POLICY "entries_read_global_analytics" ON public.timesheet_entries
-  FOR SELECT USING (public.my_has_role('global_analytics'));
+  FOR SELECT USING (
+    public.my_has_role('global_analytics')
+    AND timesheet_id IN (
+      SELECT t.id FROM public.timesheets t
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.can_see_office(pr.office_id)
+    )
+  );
 
 CREATE POLICY "entries_read_team_analytics" ON public.timesheet_entries
   FOR SELECT USING (
     public.my_has_role('team_analytics')
     AND timesheet_id IN (
       SELECT t.id FROM public.timesheets t
-      WHERE public.i_manage(t.employee_id)
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.i_manage(t.employee_id) AND public.can_see_office(pr.office_id)
     )
   );
 
@@ -416,11 +534,19 @@ CREATE POLICY "notif_update_own" ON public.notifications
 -- APP SETTINGS — singleton row of feature flags (see migration_v8).
 -- Currently just the XLSX upload toggle; in-app entry is the default.
 -- ---------------------------------------------------------------
+-- reminder_backlog_days defaults to 2, not the steady-state value of ~14
+-- you'll likely want: the FIRST time reminders are enabled against a
+-- database with real history, a 14-day backlog mails every outstanding day
+-- back to go-live to every employee, manager and HR recipient in one run.
+-- Raise it once you've confirmed a couple of clean runs.
 CREATE TABLE IF NOT EXISTS public.app_settings (
-  id                  SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-  xlsx_upload_enabled BOOLEAN NOT NULL DEFAULT false,
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_by          UUID REFERENCES public.profiles(id)
+  id                     SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  xlsx_upload_enabled    BOOLEAN NOT NULL DEFAULT false,
+  reminder_enabled       BOOLEAN NOT NULL DEFAULT true,
+  reminder_hour          INT     NOT NULL DEFAULT 9,
+  reminder_backlog_days  INT     NOT NULL DEFAULT 2,
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by             UUID REFERENCES public.profiles(id)
 );
 INSERT INTO public.app_settings (id) VALUES (1) ON CONFLICT DO NOTHING;
 
@@ -431,6 +557,31 @@ CREATE POLICY "settings_read" ON public.app_settings
   FOR SELECT USING (auth.uid() IS NOT NULL);
 CREATE POLICY "settings_manage" ON public.app_settings
   FOR ALL USING (public.my_has_role('it')) WITH CHECK (public.my_has_role('it'));
+
+-- ---------------------------------------------------------------
+-- REMINDER LOG — at-most-once-per-recipient-per-day guarantee for the
+-- daily timesheet reminder job. RLS enabled with NO policies: invisible
+-- to anon/authenticated, readable/writable only by the service-role job.
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.reminder_log (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient_id    UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  recipient_email TEXT NOT NULL,
+  business_date   DATE NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'sent',
+  error           TEXT,
+  sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Partial, not a plain unique index: a 'failed' attempt must NOT block a
+-- retry, or one transient Graph error permanently suppresses that
+-- recipient for the rest of the business day. A 'pending' or 'sent' row
+-- still blocks a duplicate claim, which is the actual guarantee this
+-- index exists for.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminder_log_recipient_date
+  ON public.reminder_log (recipient_id, business_date) WHERE status <> 'failed';
+
+ALTER TABLE public.reminder_log ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------
 -- ONE TIMESHEET PER EMPLOYEE PER DAY (see migration_v8)
@@ -545,6 +696,162 @@ CREATE POLICY "stage_logs_read" ON public.project_stage_logs
 CREATE POLICY "stage_logs_insert" ON public.project_stage_logs
   FOR INSERT WITH CHECK (public.my_has_role('projects_control') OR public.my_has_role('it'));
 
+-- ===============================================================
+-- OFFICES, continued — project scoping + admin RPCs. The offices table,
+-- profiles.office_id, and can_see_office()/my_visible_office_ids() are
+-- defined earlier (right after i_manage()) so the PROFILES policies
+-- above can reference them; projects.office_id is added here since the
+-- projects table doesn't exist until this point in the script.
+-- ===============================================================
+ALTER TABLE public.projects
+  ADD COLUMN IF NOT EXISTS office_id UUID REFERENCES public.offices(id);
+CREATE INDEX IF NOT EXISTS idx_projects_office ON public.projects(office_id);
+-- A fresh install has no pre-existing rows to backfill/lock down like the
+-- migration does, but office_id must still end up NOT NULL so no future
+-- row is ever visible to every office.
+ALTER TABLE public.projects ALTER COLUMN office_id SET NOT NULL;
+
+-- Create or rename an office (IT only). New offices get their own
+-- weekend/holiday calendar automatically (Fri/Sat default) so
+-- emp_calendar() always resolves once an employee's home office is set.
+CREATE OR REPLACE FUNCTION public.upsert_office(
+  p_id UUID, p_name TEXT, p_is_active BOOLEAN,
+  p_timezone TEXT DEFAULT NULL, p_deadline TIME DEFAULT NULL
+)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_id UUID;
+BEGIN
+  IF NOT public.my_has_role('it') THEN RAISE EXCEPTION 'Not authorized.'; END IF;
+  IF p_name IS NULL OR trim(p_name) = '' THEN RAISE EXCEPTION 'Office name is required.'; END IF;
+
+  IF p_id IS NULL THEN
+    INSERT INTO public.offices (name, is_active, timezone, timesheet_deadline)
+    VALUES (trim(p_name), COALESCE(p_is_active, true), COALESCE(p_timezone, 'Asia/Dubai'), COALESCE(p_deadline, '18:00'))
+    RETURNING id INTO v_id;
+
+    INSERT INTO public.holiday_calendars (name, weekend_days, is_default, office_id)
+    VALUES (trim(p_name), '{5,6}', false, v_id);
+  ELSE
+    UPDATE public.offices
+      SET name = trim(p_name),
+          is_active = COALESCE(p_is_active, is_active),
+          timezone = COALESCE(p_timezone, timezone),
+          timesheet_deadline = COALESCE(p_deadline, timesheet_deadline)
+      WHERE id = p_id
+      RETURNING id INTO v_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Office not found.'; END IF;
+  END IF;
+  RETURN v_id;
+END;
+$$;
+
+-- Bulk-assign home office / additional offices / sees_all_offices (IT
+-- only). p_home is always applied; p_additional/p_sees_all are only
+-- touched when non-NULL, so a bulk "move these employees to office X"
+-- call can pass NULL for both without wiping out each employee's
+-- existing additional offices or sees_all_offices flag.
+-- On a genuine office move, remaps balances + cycle grants by category
+-- NAME, preserving REMAINING days (allowance minus what was already used
+-- this cycle) — see migration_v11. leave_requests history is deliberately
+-- left on the old office's category.
+CREATE OR REPLACE FUNCTION public.set_employee_offices(
+  p_employees UUID[], p_home UUID, p_additional UUID[], p_sees_all BOOLEAN
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_movers UUID[];
+BEGIN
+  IF NOT public.my_has_role('it') THEN RAISE EXCEPTION 'Not authorized.'; END IF;
+  IF p_home IS NULL THEN RAISE EXCEPTION 'A home office is required.'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.offices WHERE id = p_home) THEN
+    RAISE EXCEPTION 'Office not found.';
+  END IF;
+
+  -- Captured BEFORE the UPDATE — once office_id changes, the "old office"
+  -- needed to match categories below is gone. Employees only having their
+  -- additional offices edited are excluded, so their balances are untouched.
+  SELECT COALESCE(array_agg(id), '{}') INTO v_movers
+    FROM public.profiles
+   WHERE id = ANY(p_employees) AND office_id IS DISTINCT FROM p_home;
+
+  UPDATE public.profiles
+    SET office_id             = p_home,
+        additional_office_ids = COALESCE(p_additional, additional_office_ids),
+        sees_all_offices      = COALESCE(p_sees_all, sees_all_offices),
+        updated_at            = NOW()
+    WHERE id = ANY(p_employees);
+
+  IF cardinality(v_movers) = 0 THEN RETURN; END IF;
+
+  -- Preserve REMAINING: reduce the balance by what was already used this
+  -- cycle on the old category before carrying it to the new one. A
+  -- category with no same-named counterpart in the destination office is
+  -- left untouched (leave_cat_read_referenced keeps it readable so it
+  -- doesn't render blank).
+  UPDATE public.leave_balances src
+     SET allowance = GREATEST(0, src.allowance - COALESCE((
+           SELECT SUM(lr.days_count) FROM public.leave_requests lr
+            WHERE lr.employee_id = src.employee_id
+              AND lr.category_id = src.category_id
+              AND lr.status = 'approved'
+              AND lr.start_date >= public.leave_cycle_start(p.joining_date, CURRENT_DATE)
+         ), 0)), updated_at = NOW()
+    FROM public.profiles p, public.leave_categories sc
+   WHERE p.id = src.employee_id AND p.joining_date IS NOT NULL
+     AND src.employee_id = ANY(v_movers)
+     AND sc.id = src.category_id AND sc.office_id <> p_home;
+
+  -- Collision (destination category already has a balance row for this
+  -- employee): keep the greater allowance, drop the stale row.
+  UPDATE public.leave_balances dst
+     SET allowance = GREATEST(dst.allowance, src.allowance), updated_at = NOW()
+    FROM public.leave_balances src
+    JOIN public.leave_categories sc ON sc.id = src.category_id
+    JOIN public.leave_categories dc ON dc.office_id = p_home AND lower(dc.name) = lower(sc.name)
+   WHERE src.employee_id = ANY(v_movers)
+     AND sc.office_id <> p_home
+     AND dst.employee_id = src.employee_id
+     AND dst.category_id = dc.id;
+
+  DELETE FROM public.leave_balances src
+   USING public.leave_categories sc, public.leave_categories dc
+   WHERE src.employee_id = ANY(v_movers)
+     AND sc.id = src.category_id AND sc.office_id <> p_home
+     AND dc.office_id = p_home AND lower(dc.name) = lower(sc.name)
+     AND EXISTS (SELECT 1 FROM public.leave_balances d
+                  WHERE d.employee_id = src.employee_id AND d.category_id = dc.id);
+
+  UPDATE public.leave_balances src
+     SET category_id = dc.id, updated_at = NOW()
+    FROM public.leave_categories sc, public.leave_categories dc
+   WHERE src.employee_id = ANY(v_movers)
+     AND sc.id = src.category_id AND sc.office_id <> p_home
+     AND dc.office_id = p_home AND lower(dc.name) = lower(sc.name);
+
+  -- The grant row MUST follow the balance — it's run_leave_cycle()'s
+  -- idempotency guard, and AuthContext fires that on every login. Leave it
+  -- behind and the mover's next sign-in re-grants the current cycle
+  -- against the destination category, overwriting the allowance just
+  -- carefully preserved above with a bare default_days_per_year.
+  DELETE FROM public.leave_cycle_grants src
+   USING public.leave_categories sc, public.leave_categories dc
+   WHERE src.employee_id = ANY(v_movers)
+     AND sc.id = src.category_id AND sc.office_id <> p_home
+     AND dc.office_id = p_home AND lower(dc.name) = lower(sc.name)
+     AND EXISTS (SELECT 1 FROM public.leave_cycle_grants d
+                  WHERE d.employee_id = src.employee_id AND d.category_id = dc.id
+                    AND d.cycle_start = src.cycle_start);
+
+  UPDATE public.leave_cycle_grants src
+     SET category_id = dc.id
+    FROM public.leave_categories sc, public.leave_categories dc
+   WHERE src.employee_id = ANY(v_movers)
+     AND sc.id = src.category_id AND sc.office_id <> p_home
+     AND dc.office_id = p_home AND lower(dc.name) = lower(sc.name);
+
+  -- leave_requests are deliberately NOT remapped — leave taken in the old
+  -- office stays that office's history.
+END;
+$$;
+
 -- ---------------------------------------------------------------
 -- STORAGE POLICIES (run after creating the bucket manually)
 -- Bucket name: timesheet-files   Type: Private
@@ -604,17 +911,21 @@ CREATE INDEX IF NOT EXISTS idx_entries_stage_id   ON public.timesheet_entries(st
 -- TABLES
 -- ---------------------------------------------------------------
 
--- Dynamic leave categories created by HR (Paid, Sick, Unpaid, Study, …)
+-- Dynamic leave categories created by HR (Paid, Sick, Unpaid, Study, …).
+-- Per-office (see migration_v11) — a fresh install has no pre-existing rows
+-- to backfill, so office_id is declared NOT NULL directly, same reasoning
+-- as profiles.office_id / projects.office_id in the OFFICES section above.
 CREATE TABLE IF NOT EXISTS public.leave_categories (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        TEXT NOT NULL,
+  office_id   UUID NOT NULL REFERENCES public.offices(id) DEFAULT public.my_office_id(),
   is_paid     BOOLEAN NOT NULL DEFAULT true,   -- false = record-only, no balance deduction
   is_active   BOOLEAN NOT NULL DEFAULT true,
   created_by  UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_leave_categories_name_lower ON public.leave_categories(lower(name));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leave_categories_office_name_lower ON public.leave_categories(office_id, lower(name));
 
 -- Per-employee, per-category allowance (in days). HR sets this manually.
 -- Usage is computed (allowance − Σ approved days_count), never mutated in place.
@@ -653,6 +964,73 @@ CREATE TABLE IF NOT EXISTS public.leave_requests (
 CREATE INDEX IF NOT EXISTS idx_leave_requests_employee ON public.leave_requests(employee_id);
 CREATE INDEX IF NOT EXISTS idx_leave_requests_status   ON public.leave_requests(status);
 CREATE INDEX IF NOT EXISTS idx_leave_requests_dates    ON public.leave_requests(start_date, end_date);
+CREATE INDEX IF NOT EXISTS idx_leave_requests_category ON public.leave_requests(category_id);
+
+-- ---------------------------------------------------------------
+-- JOINING DATE & DYNAMIC LEAVE CYCLES (see migration_v9)
+-- Each paid leave category can define a policy (default days/year,
+-- optional rollover with cap + expiry). run_leave_cycle() grants/refreshes
+-- an employee's balance once per anniversary year, idempotently.
+-- ---------------------------------------------------------------
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS joining_date DATE;
+
+CREATE TABLE IF NOT EXISTS public.leave_policies (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  category_id            UUID NOT NULL UNIQUE
+                           REFERENCES public.leave_categories(id) ON DELETE CASCADE,
+  default_days_per_year  NUMERIC(6,2) NOT NULL DEFAULT 0,
+  rollover_enabled       BOOLEAN NOT NULL DEFAULT false,
+  rollover_cap           NUMERIC(6,2),  -- NULL = uncapped
+  rollover_expiry_months INT,           -- NULL = carried days never expire
+  prorate_first_year     BOOLEAN NOT NULL DEFAULT true,  -- reserved, see migration_v9 note
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by             UUID REFERENCES public.profiles(id)
+);
+DROP TRIGGER IF EXISTS leave_policies_updated_at ON public.leave_policies;
+CREATE TRIGGER leave_policies_updated_at BEFORE UPDATE ON public.leave_policies
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+CREATE TABLE IF NOT EXISTS public.leave_cycle_grants (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id       UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  category_id       UUID NOT NULL REFERENCES public.leave_categories(id) ON DELETE CASCADE,
+  cycle_start       DATE NOT NULL,
+  cycle_end         DATE NOT NULL,
+  granted           NUMERIC(6,2) NOT NULL DEFAULT 0,
+  carried_in        NUMERIC(6,2) NOT NULL DEFAULT 0,
+  carry_expires_on  DATE,
+  carry_expired_at  TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (employee_id, category_id, cycle_start)
+);
+CREATE INDEX IF NOT EXISTS idx_leave_cycle_grants_employee ON public.leave_cycle_grants(employee_id, category_id, cycle_start DESC);
+CREATE INDEX IF NOT EXISTS idx_leave_cycle_grants_expiry   ON public.leave_cycle_grants(carry_expires_on) WHERE carry_expired_at IS NULL;
+
+ALTER TABLE public.leave_policies     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.leave_cycle_grants ENABLE ROW LEVEL SECURITY;
+
+-- Office-scoped through the category (leave_policies itself has no
+-- office_id — its office is derived).
+DROP POLICY IF EXISTS "leave_policies_read" ON public.leave_policies;
+CREATE POLICY "leave_policies_read" ON public.leave_policies
+  FOR SELECT USING (
+    (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
+    AND EXISTS (
+      SELECT 1 FROM public.leave_categories c
+       WHERE c.id = category_id AND public.can_see_office(c.office_id)
+    )
+  );
+
+DROP POLICY IF EXISTS "leave_cycle_grants_read_own"        ON public.leave_cycle_grants;
+DROP POLICY IF EXISTS "leave_cycle_grants_read_privileged" ON public.leave_cycle_grants;
+CREATE POLICY "leave_cycle_grants_read_own" ON public.leave_cycle_grants
+  FOR SELECT USING (auth.uid() = employee_id);
+CREATE POLICY "leave_cycle_grants_read_privileged" ON public.leave_cycle_grants
+  FOR SELECT USING (
+    (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
+  );
 
 -- Holiday / weekend calendars. weekend_days uses Postgres DOW (0=Sun … 6=Sat).
 -- Company default is Friday/Saturday = {5,6}.
@@ -664,6 +1042,12 @@ CREATE TABLE IF NOT EXISTS public.holiday_calendars (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Calendars are tied 1:1 to an office (see migration_v10); emp_calendar()
+-- resolves through this instead of calendar_assignments below.
+ALTER TABLE public.holiday_calendars
+  ADD COLUMN IF NOT EXISTS office_id UUID REFERENCES public.offices(id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_office ON public.holiday_calendars(office_id);
 
 -- One calendar per employee (multi-select assignment expands to rows here).
 -- Unassigned employees fall back to the default calendar.
@@ -707,11 +1091,16 @@ CREATE TRIGGER holiday_calendars_updated_at BEFORE UPDATE ON public.holiday_cale
 -- CALENDAR / WORKING-DAY HELPERS
 -- ---------------------------------------------------------------
 
--- Resolve an employee's effective calendar (assigned, else default).
+-- Resolve an employee's effective calendar via their HOME office, falling
+-- back to the default calendar (e.g. an office created without
+-- upsert_office ever provisioning one). calendar_assignments is no longer
+-- consulted — the table/RLS/RPC stay in place but unused (see migration_v10).
 CREATE OR REPLACE FUNCTION public.emp_calendar(emp UUID)
 RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(
-    (SELECT calendar_id FROM public.calendar_assignments WHERE employee_id = emp),
+    (SELECT hc.id FROM public.holiday_calendars hc
+       JOIN public.profiles p ON p.office_id = hc.office_id
+      WHERE p.id = emp),
     (SELECT id FROM public.holiday_calendars WHERE is_default LIMIT 1)
   );
 $$;
@@ -741,6 +1130,147 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   SELECT COUNT(*)::NUMERIC
   FROM generate_series(d_start, d_end, INTERVAL '1 day') AS g(d)
   WHERE public.is_working_day(emp, g.d::DATE);
+$$;
+
+-- ---------------------------------------------------------------
+-- DAILY TIMESHEET REMINDERS — backing functions for the scheduled job
+-- (see netlify/functions/daily-timesheet-reminders.js). Both return
+-- cross-employee, cross-office data assembled for the service-role job
+-- and are REVOKEd from anon/authenticated below.
+-- ---------------------------------------------------------------
+
+-- One row per PROBLEM day (state 'missing' or 'late') across every active
+-- office, each judged against that office's own local business date and
+-- deadline. 'missing' rows span the whole backlog window so a persistent
+-- gap stays visible; 'late' rows are returned only for business_date
+-- itself — otherwise one 18:30 submission would haunt a manager's table
+-- every morning for a fortnight and train everyone to ignore the email.
+CREATE OR REPLACE FUNCTION public.timesheet_status_report(p_backlog_days INT DEFAULT 14)
+RETURNS TABLE (
+  employee_id   UUID,
+  full_name     TEXT,
+  email         TEXT,
+  office_id     UUID,
+  office_name   TEXT,
+  manager_ids   UUID[],
+  business_date DATE,
+  state         TEXT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  WITH windows AS (
+    SELECT o.id AS office_id, o.name AS office_name, o.timezone, o.timesheet_deadline,
+           ((now() AT TIME ZONE o.timezone)::date - 1) AS business_date
+    FROM public.offices o
+    WHERE o.is_active
+  ),
+  candidate_days AS (
+    SELECT p.id AS employee_id, p.full_name, p.email, p.office_id,
+           w.office_name, p.manager_ids, w.timezone, w.timesheet_deadline, w.business_date,
+           gs.d::date AS d
+    FROM public.profiles p
+    JOIN windows w ON w.office_id = p.office_id
+    CROSS JOIN LATERAL generate_series(
+      w.business_date - p_backlog_days, w.business_date, INTERVAL '1 day'
+    ) AS gs(d)
+    WHERE p.onboarding_complete
+      AND p.joining_date IS NOT NULL
+      AND p.joining_date <= gs.d::date
+  ),
+  problem_days AS (
+    SELECT cd.*,
+      (SELECT t.created_at FROM public.timesheets t
+        WHERE t.employee_id = cd.employee_id AND t.date = cd.d
+          AND t.status IN ('pending', 'approved')
+        LIMIT 1) AS live_created_at
+    FROM candidate_days cd
+    WHERE public.is_working_day(cd.employee_id, cd.d)
+      -- Only a full-day approved leave excuses the day — someone on two
+      -- hours' hourly leave still worked the rest and still owes a sheet.
+      AND NOT EXISTS (
+        SELECT 1 FROM public.leave_requests lr
+        WHERE lr.employee_id = cd.employee_id
+          AND lr.status = 'approved' AND lr.revoked_at IS NULL
+          AND lr.unit = 'daily'
+          AND cd.d BETWEEN lr.start_date AND lr.end_date
+      )
+  )
+  SELECT employee_id, full_name, email, office_id, office_name, manager_ids, d, 'missing'
+  FROM problem_days
+  WHERE live_created_at IS NULL
+
+  UNION ALL
+
+  SELECT employee_id, full_name, email, office_id, office_name, manager_ids, d, 'late'
+  FROM problem_days
+  WHERE live_created_at IS NOT NULL
+    AND d = business_date
+    AND (live_created_at AT TIME ZONE timezone) > (d + timesheet_deadline);
+$$;
+
+-- Who's due a mail right now. Send time is the RECIPIENT's own
+-- home-office local hour — not the hour of whichever office(s) their
+-- digest happens to cover. An office-centric job would mail a
+-- New-York-based HR user their Dubai section at 01:00 EDT, and send a
+-- second, separate email per office. One row per person.
+CREATE OR REPLACE FUNCTION public.reminder_recipients(p_reminder_hour INT DEFAULT 9)
+RETURNS TABLE (
+  user_id             UUID,
+  email               TEXT,
+  full_name           TEXT,
+  home_office_id      UUID,
+  local_business_date DATE,
+  visible_office_ids  UUID[],
+  is_hr               BOOLEAN
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT p.id, p.email, p.full_name, p.office_id,
+         ((now() AT TIME ZONE o.timezone)::date - 1),
+         public.visible_office_ids_for(p.id),
+         -- Same roles-array-with-legacy-role-column fallback as
+         -- my_has_role() — an HR user still on the legacy single `role`
+         -- column (never migrated onto the `roles` array) otherwise gets
+         -- silently excluded from every HR digest.
+         ((cardinality(p.roles) > 0 AND 'hr_view_timesheets' = ANY(p.roles))
+           OR (cardinality(p.roles) = 0 AND p.role = 'hr_view_timesheets'))
+  FROM public.profiles p
+  JOIN public.offices o ON o.id = p.office_id
+  WHERE o.is_active
+    AND EXTRACT(hour FROM (now() AT TIME ZONE o.timezone)) >= p_reminder_hour;
+$$;
+
+-- CREATE FUNCTION grants EXECUTE to PUBLIC by default, and Postgres
+-- privilege checks are additive across direct grants, role membership AND
+-- PUBLIC — revoking from anon/authenticated alone leaves the PUBLIC grant
+-- standing, so ANY authenticated user could call these via PostgREST RPC
+-- and read every employee's name, email, office and attendance gaps. Must
+-- revoke from PUBLIC itself; service_role bypasses grants entirely, so the
+-- reminder job is unaffected.
+REVOKE EXECUTE ON FUNCTION public.timesheet_status_report(INT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.reminder_recipients(INT)     FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.visible_office_ids_for(UUID) FROM PUBLIC;
+
+-- Composite index backing timesheet_status_report()'s problem_days
+-- correlated subquery — one `WHERE employee_id = ... AND date = ...`
+-- lookup per employee-day in the backlog window. Only single-column
+-- indexes on employee_id and date existed before this.
+CREATE INDEX IF NOT EXISTS idx_timesheets_employee_date
+  ON public.timesheets (employee_id, date);
+
+-- Lets an IT admin see reminder run history. reminder_log has RLS enabled
+-- with NO policies (by design), so it's invisible even to IT through
+-- PostgREST directly — this wraps it in a SECURITY DEFINER function gated
+-- by an internal my_has_role('it') check, the same pattern upsert_office
+-- uses. No REVOKE needed: the internal check is what actually gates
+-- access, not the grant.
+CREATE OR REPLACE FUNCTION public.reminder_log_recent(p_hours INT DEFAULT 48)
+RETURNS SETOF public.reminder_log
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT public.my_has_role('it') THEN RAISE EXCEPTION 'Not authorized.'; END IF;
+  RETURN QUERY
+    SELECT * FROM public.reminder_log
+    WHERE sent_at > NOW() - (GREATEST(p_hours, 1) || ' hours')::INTERVAL
+    ORDER BY sent_at DESC
+    LIMIT 500;
+END;
 $$;
 
 -- ---------------------------------------------------------------
@@ -816,6 +1346,9 @@ CREATE OR REPLACE FUNCTION public.submit_leave_request(
 ) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_emp UUID := auth.uid();
+  v_office     UUID;
+  v_cat_office UUID;
+  v_cat_active BOOLEAN;
   v_has_mgr BOOLEAN;
   v_status leave_request_status;
   v_days NUMERIC;
@@ -823,6 +1356,21 @@ DECLARE
   v_id UUID;
 BEGIN
   IF v_emp IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  -- Category gate (see migration_v11): must exist, be active, and belong
+  -- to the submitter's HOME office. SECURITY DEFINER bypasses RLS, so this
+  -- is the only enforcement point — additional_office_ids/sees_all_offices
+  -- grant administrative visibility, not the right to book another
+  -- office's leave against your own balance.
+  SELECT office_id INTO v_office FROM public.profiles WHERE id = v_emp;
+
+  SELECT office_id, is_active INTO v_cat_office, v_cat_active
+    FROM public.leave_categories WHERE id = p_category;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Unknown leave category.'; END IF;
+  IF NOT v_cat_active THEN RAISE EXCEPTION 'That leave category is no longer available.'; END IF;
+  IF v_cat_office IS DISTINCT FROM v_office THEN
+    RAISE EXCEPTION 'That leave category does not belong to your office.';
+  END IF;
 
   IF p_unit = 'hourly' THEN
     p_end := p_start;
@@ -946,10 +1494,28 @@ $$;
 CREATE OR REPLACE FUNCTION public.set_leave_balance(
   p_employees UUID[], p_category UUID, p_allowance NUMERIC
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_office UUID; v_bad INT;
 BEGIN
   IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
     RAISE EXCEPTION 'Not authorized.';
   END IF;
+
+  -- Existence before visibility: a missing category yields NULL, and
+  -- can_see_office(NULL) is TRUE by design, so checking visibility first
+  -- would wave through a garbage category id.
+  SELECT office_id INTO v_office FROM public.leave_categories WHERE id = p_category;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Unknown leave category.'; END IF;
+  IF NOT public.can_see_office(v_office) THEN
+    RAISE EXCEPTION 'That leave category belongs to an office you cannot manage.';
+  END IF;
+
+  SELECT COUNT(*) INTO v_bad
+    FROM unnest(p_employees) AS e(id)
+   WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = e.id AND p.office_id = v_office);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'Cannot set this category for % employee(s) outside its office.', v_bad;
+  END IF;
+
   INSERT INTO public.leave_balances (employee_id, category_id, allowance)
   SELECT unnest(p_employees), p_category, p_allowance
   ON CONFLICT (employee_id, category_id)
@@ -966,10 +1532,25 @@ $$;
 CREATE OR REPLACE FUNCTION public.adjust_leave_balance(
   p_employees UUID[], p_category UUID, p_delta NUMERIC
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_office UUID; v_bad INT;
 BEGIN
   IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
     RAISE EXCEPTION 'Not authorized.';
   END IF;
+
+  SELECT office_id INTO v_office FROM public.leave_categories WHERE id = p_category;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Unknown leave category.'; END IF;
+  IF NOT public.can_see_office(v_office) THEN
+    RAISE EXCEPTION 'That leave category belongs to an office you cannot manage.';
+  END IF;
+
+  SELECT COUNT(*) INTO v_bad
+    FROM unnest(p_employees) AS e(id)
+   WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = e.id AND p.office_id = v_office);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'Cannot adjust this category for % employee(s) outside its office.', v_bad;
+  END IF;
+
   INSERT INTO public.leave_balances (employee_id, category_id, allowance)
   SELECT unnest(p_employees), p_category, GREATEST(0, p_delta)
   ON CONFLICT (employee_id, category_id)
@@ -991,7 +1572,232 @@ END;
 $$;
 
 -- ---------------------------------------------------------------
+-- LEAVE CYCLE ENGINE (see migration_v9)
+-- ---------------------------------------------------------------
+
+-- Most recent anniversary of p_joining on or before p_today.
+CREATE OR REPLACE FUNCTION public.leave_cycle_start(p_joining DATE, p_today DATE)
+RETURNS DATE LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN (p_joining + ((date_part('year', age(p_today, p_joining)))::int || ' years')::interval)::date <= p_today
+    THEN (p_joining + ((date_part('year', age(p_today, p_joining)))::int || ' years')::interval)::date
+    ELSE (p_joining + ((date_part('year', age(p_today, p_joining)))::int - 1 || ' years')::interval)::date
+  END;
+$$;
+
+-- HR: create/update a category's leave policy.
+CREATE OR REPLACE FUNCTION public.upsert_leave_policy(
+  p_category UUID, p_default_days NUMERIC, p_rollover_enabled BOOLEAN,
+  p_rollover_cap NUMERIC, p_rollover_expiry_months INT
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_id UUID; v_office UUID;
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+
+  -- The policy's office is derived from its category (leave_policies has
+  -- no office_id of its own), so only a visibility check is needed here.
+  SELECT office_id INTO v_office FROM public.leave_categories WHERE id = p_category;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Unknown leave category.'; END IF;
+  IF NOT public.can_see_office(v_office) THEN
+    RAISE EXCEPTION 'That leave category belongs to an office you cannot manage.';
+  END IF;
+
+  IF p_default_days IS NULL OR p_default_days < 0 THEN
+    RAISE EXCEPTION 'Default days per year must be zero or positive.';
+  END IF;
+  IF p_rollover_cap IS NOT NULL AND p_rollover_cap < 0 THEN
+    RAISE EXCEPTION 'Rollover cap cannot be negative.';
+  END IF;
+  IF p_rollover_expiry_months IS NOT NULL AND p_rollover_expiry_months <= 0 THEN
+    RAISE EXCEPTION 'Rollover expiry must be a positive number of months.';
+  END IF;
+
+  INSERT INTO public.leave_policies
+    (category_id, default_days_per_year, rollover_enabled, rollover_cap, rollover_expiry_months, updated_by)
+  VALUES
+    (p_category, p_default_days, COALESCE(p_rollover_enabled, false), p_rollover_cap, p_rollover_expiry_months, auth.uid())
+  ON CONFLICT (category_id) DO UPDATE SET
+    default_days_per_year  = EXCLUDED.default_days_per_year,
+    rollover_enabled       = EXCLUDED.rollover_enabled,
+    rollover_cap           = EXCLUDED.rollover_cap,
+    rollover_expiry_months = EXCLUDED.rollover_expiry_months,
+    updated_by             = auth.uid(),
+    updated_at             = NOW()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+
+-- HR / Employee Overview: set an employee's joining date.
+CREATE OR REPLACE FUNCTION public.set_joining_date(p_employees UUID[], p_date DATE)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT (public.my_has_role('employee_overview') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+  UPDATE public.profiles SET joining_date = p_date, updated_at = NOW() WHERE id = ANY(p_employees);
+END;
+$$;
+
+-- Grant/refresh each employee's balance for their current anniversary cycle.
+-- Idempotent (guarded by the leave_cycle_grants UNIQUE constraint).
+--   p_employee = NULL   → process every office the caller can see (IT only —
+--     the "Run leave cycle now" sweep lives in the IT Panel).
+--   p_employee = <uuid> → process just that employee; a non-privileged
+--     caller may only pass their OWN id (self-service "catch me up" call,
+--     fired on every login).
+CREATE OR REPLACE FUNCTION public.run_leave_cycle(p_employee UUID DEFAULT NULL)
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_emp            RECORD;
+  v_pol            RECORD;
+  v_cycle_start    DATE;
+  v_cycle_end      DATE;
+  v_prev_grant     RECORD;
+  v_prev_used      NUMERIC;
+  v_current_alw    NUMERIC;
+  v_prev_remaining NUMERIC;
+  v_carried_in     NUMERIC;
+  v_carry_expires  DATE;
+  v_count          INT := 0;
+BEGIN
+  IF p_employee IS NULL THEN
+    IF NOT public.my_has_role('it') THEN RAISE EXCEPTION 'Not authorized.'; END IF;
+  ELSIF p_employee <> auth.uid() THEN
+    IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+      RAISE EXCEPTION 'Not authorized.';
+    END IF;
+  END IF;
+
+  FOR v_emp IN
+    -- office_id correlates the policy loop below. The visibility predicate
+    -- is defense in depth for the specific-employee case (id = auth.uid()
+    -- always allowed — that's the login path); IT already sees every
+    -- office, so it changes nothing for the NULL sweep.
+    SELECT id, joining_date, office_id FROM public.profiles
+     WHERE joining_date IS NOT NULL
+       AND (p_employee IS NULL OR id = p_employee)
+       AND (id = auth.uid() OR office_id = ANY(public.my_visible_office_ids()))
+  LOOP
+    v_cycle_start := public.leave_cycle_start(v_emp.joining_date, CURRENT_DATE);
+    v_cycle_end   := (v_cycle_start + INTERVAL '1 year' - INTERVAL '1 day')::date;
+
+    FOR v_pol IN
+      -- A policy's office is resolved through its category — this one
+      -- added predicate is the entire per-office cycle engine.
+      SELECT lp.* FROM public.leave_policies lp
+      JOIN public.leave_categories lc ON lc.id = lp.category_id
+      WHERE lc.is_active AND lc.is_paid
+        AND lc.office_id = v_emp.office_id
+    LOOP
+      IF EXISTS (
+        SELECT 1 FROM public.leave_cycle_grants
+        WHERE employee_id = v_emp.id AND category_id = v_pol.category_id AND cycle_start = v_cycle_start
+      ) THEN
+        CONTINUE;
+      END IF;
+
+      -- Carry-in based on the LIVE balance (so manual HR adjustments made
+      -- mid-cycle are respected, not wiped out by the rollover), minus what
+      -- was actually used during the previous cycle window.
+      v_carried_in := 0;
+      IF v_pol.rollover_enabled THEN
+        SELECT * INTO v_prev_grant FROM public.leave_cycle_grants
+          WHERE employee_id = v_emp.id AND category_id = v_pol.category_id
+          ORDER BY cycle_start DESC LIMIT 1;
+
+        IF FOUND THEN
+          SELECT allowance INTO v_current_alw FROM public.leave_balances
+            WHERE employee_id = v_emp.id AND category_id = v_pol.category_id;
+
+          SELECT COALESCE(SUM(days_count), 0) INTO v_prev_used
+            FROM public.leave_requests
+            WHERE employee_id = v_emp.id AND category_id = v_pol.category_id
+              AND status = 'approved'
+              AND start_date >= v_prev_grant.cycle_start AND start_date <= v_prev_grant.cycle_end;
+
+          v_prev_remaining := GREATEST(0, COALESCE(v_current_alw, 0) - v_prev_used);
+          v_carried_in := LEAST(v_prev_remaining, COALESCE(v_pol.rollover_cap, v_prev_remaining));
+        END IF;
+      END IF;
+
+      v_carry_expires := NULL;
+      IF v_pol.rollover_enabled AND v_pol.rollover_expiry_months IS NOT NULL THEN
+        v_carry_expires := (v_cycle_start + (v_pol.rollover_expiry_months || ' months')::interval)::date;
+      END IF;
+
+      INSERT INTO public.leave_balances (employee_id, category_id, allowance)
+      VALUES (v_emp.id, v_pol.category_id, v_pol.default_days_per_year + v_carried_in)
+      ON CONFLICT (employee_id, category_id)
+      DO UPDATE SET allowance = v_pol.default_days_per_year + v_carried_in, updated_at = NOW();
+
+      INSERT INTO public.leave_cycle_grants
+        (employee_id, category_id, cycle_start, cycle_end, granted, carried_in, carry_expires_on)
+      VALUES
+        (v_emp.id, v_pol.category_id, v_cycle_start, v_cycle_end, v_pol.default_days_per_year, v_carried_in, v_carry_expires);
+
+      v_count := v_count + 1;
+    END LOOP;
+  END LOOP;
+
+  RETURN v_count;
+END;
+$$;
+
+-- Claw back the unused portion of any carried-in balance whose expiry date
+-- has passed. HR/IT only — scoped to offices the caller can see (was
+-- company-wide regardless of caller's office; closed alongside the rest of
+-- the per-office pass in migration_v11). Idempotent via carry_expired_at.
+CREATE OR REPLACE FUNCTION public.expire_carried_leave()
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_grant        RECORD;
+  v_used_since   NUMERIC;
+  v_unused_carry NUMERIC;
+  v_count        INT := 0;
+BEGIN
+  IF NOT (public.my_has_role('hr_manage_policies') OR public.my_has_role('it')) THEN
+    RAISE EXCEPTION 'Not authorized.';
+  END IF;
+
+  FOR v_grant IN
+    SELECT g.* FROM public.leave_cycle_grants g
+    JOIN public.profiles p ON p.id = g.employee_id
+    WHERE g.carry_expires_on IS NOT NULL
+      AND g.carry_expires_on < CURRENT_DATE
+      AND g.carry_expired_at IS NULL
+      AND g.carried_in > 0
+      AND p.office_id = ANY(public.my_visible_office_ids())
+  LOOP
+    SELECT COALESCE(SUM(days_count), 0) INTO v_used_since
+      FROM public.leave_requests
+      WHERE employee_id = v_grant.employee_id AND category_id = v_grant.category_id
+        AND status = 'approved'
+        AND start_date >= v_grant.cycle_start AND start_date <= v_grant.carry_expires_on;
+
+    v_unused_carry := GREATEST(0, v_grant.carried_in - GREATEST(0, v_used_since - v_grant.granted));
+
+    IF v_unused_carry > 0 THEN
+      UPDATE public.leave_balances
+        SET allowance = GREATEST(0, allowance - v_unused_carry), updated_at = NOW()
+        WHERE employee_id = v_grant.employee_id AND category_id = v_grant.category_id;
+    END IF;
+
+    UPDATE public.leave_cycle_grants SET carry_expired_at = NOW() WHERE id = v_grant.id;
+    v_count := v_count + 1;
+  END LOOP;
+
+  RETURN v_count;
+END;
+$$;
+
+-- ---------------------------------------------------------------
 -- BALANCE SUMMARY VIEW (security_invoker = respects caller RLS)
+-- "used" is cycle-scoped for employees with a joining_date (see
+-- migration_v9); employees without one keep the old lifetime-cumulative
+-- behaviour unchanged.
 -- ---------------------------------------------------------------
 DROP VIEW IF EXISTS public.leave_balance_summary;
 CREATE VIEW public.leave_balance_summary WITH (security_invoker = true) AS
@@ -1006,15 +1812,18 @@ SELECT
     WHERE lr.employee_id = b.employee_id
       AND lr.category_id = b.category_id
       AND lr.status = 'approved'
+      AND (p.joining_date IS NULL OR lr.start_date >= public.leave_cycle_start(p.joining_date, CURRENT_DATE))
   ), 0) AS used,
   b.allowance - COALESCE((
     SELECT SUM(lr.days_count) FROM public.leave_requests lr
     WHERE lr.employee_id = b.employee_id
       AND lr.category_id = b.category_id
       AND lr.status = 'approved'
+      AND (p.joining_date IS NULL OR lr.start_date >= public.leave_cycle_start(p.joining_date, CURRENT_DATE))
   ), 0) AS remaining
 FROM public.leave_balances b
-JOIN public.leave_categories c ON c.id = b.category_id;
+JOIN public.leave_categories c ON c.id = b.category_id
+JOIN public.profiles p ON p.id = b.employee_id;
 
 -- ---------------------------------------------------------------
 -- ROW LEVEL SECURITY
@@ -1026,14 +1835,49 @@ ALTER TABLE public.holiday_calendars    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.calendar_assignments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.public_holidays      ENABLE ROW LEVEL SECURITY;
 
--- ---- LEAVE CATEGORIES ---- (everyone reads active list; HR/IT manage)
-DROP POLICY IF EXISTS "leave_cat_read"   ON public.leave_categories;
-DROP POLICY IF EXISTS "leave_cat_manage" ON public.leave_categories;
+-- ---- LEAVE CATEGORIES ---- (per-office, see migration_v11)
+-- leave_cat_manage is FOR ALL, so its USING clause doubles as a SELECT
+-- policy — office-scoping only leave_cat_read would leave HR/IT with
+-- unrestricted global read via that OR.
+DROP POLICY IF EXISTS "leave_cat_read"            ON public.leave_categories;
+DROP POLICY IF EXISTS "leave_cat_read_referenced" ON public.leave_categories;
+DROP POLICY IF EXISTS "leave_cat_manage"          ON public.leave_categories;
+
 CREATE POLICY "leave_cat_read" ON public.leave_categories
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+  FOR SELECT USING (auth.uid() IS NOT NULL AND public.can_see_office(office_id));
+
+-- History escape hatch: an employee moved between offices keeps old
+-- requests (and possibly a stray balance) pointed at a category outside
+-- their current office. Without this, those rows render with a blank
+-- category name and leave_balance_summary (a security_invoker view that
+-- JOINs categories) drops them entirely. The sub-selects are themselves
+-- RLS-checked against leave_requests/leave_balances, so this grants no
+-- visibility the caller doesn't already have, and neither of those
+-- tables' policies reference leave_categories, so there's no recursion.
+CREATE POLICY "leave_cat_read_referenced" ON public.leave_categories
+  FOR SELECT USING (
+    auth.uid() IS NOT NULL
+    AND (
+      EXISTS (SELECT 1 FROM public.leave_requests lr WHERE lr.category_id = leave_categories.id)
+      OR EXISTS (SELECT 1 FROM public.leave_balances lb WHERE lb.category_id = leave_categories.id)
+    )
+  );
+
+-- Writes stay a direct client INSERT/UPDATE (no category RPC), so the
+-- office boundary lives in WITH CHECK. office_id IS NOT NULL is redundant
+-- given the column constraint but documents intent and survives a future
+-- ALTER, since can_see_office(NULL) is deliberately TRUE.
 CREATE POLICY "leave_cat_manage" ON public.leave_categories
-  FOR ALL USING (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
-  WITH CHECK (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'));
+  FOR ALL
+  USING (
+    (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
+    AND public.can_see_office(office_id)
+  )
+  WITH CHECK (
+    (public.my_has_role('hr_manage_policies') OR public.my_has_role('it'))
+    AND office_id IS NOT NULL
+    AND public.can_see_office(office_id)
+  );
 
 -- ---- LEAVE BALANCES ---- (own + privileged read; writes via RPC only)
 DROP POLICY IF EXISTS "leave_bal_read_own"        ON public.leave_balances;
@@ -1041,7 +1885,10 @@ DROP POLICY IF EXISTS "leave_bal_read_privileged" ON public.leave_balances;
 CREATE POLICY "leave_bal_read_own" ON public.leave_balances
   FOR SELECT USING (employee_id = auth.uid());
 CREATE POLICY "leave_bal_read_privileged" ON public.leave_balances
-  FOR SELECT USING (public.has_any_hr_flag() OR public.my_has_role('it'));
+  FOR SELECT USING (
+    (public.has_any_hr_flag() OR public.my_has_role('it'))
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
+  );
 
 -- ---- LEAVE REQUESTS ---- (reads; all writes go through SECURITY DEFINER RPCs)
 DROP POLICY IF EXISTS "leave_req_read_own"        ON public.leave_requests;
@@ -1050,15 +1897,21 @@ DROP POLICY IF EXISTS "leave_req_read_privileged" ON public.leave_requests;
 CREATE POLICY "leave_req_read_own" ON public.leave_requests
   FOR SELECT USING (employee_id = auth.uid());
 CREATE POLICY "leave_req_read_manager" ON public.leave_requests
-  FOR SELECT USING (public.i_manage(employee_id));
+  FOR SELECT USING (
+    public.i_manage(employee_id)
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
+  );
 CREATE POLICY "leave_req_read_privileged" ON public.leave_requests
-  FOR SELECT USING (public.has_any_hr_flag() OR public.my_has_role('it'));
+  FOR SELECT USING (
+    (public.has_any_hr_flag() OR public.my_has_role('it'))
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
+  );
 
 -- ---- CALENDARS / HOLIDAYS ---- (readable by all authenticated; HR/IT manage)
 DROP POLICY IF EXISTS "cal_read"   ON public.holiday_calendars;
 DROP POLICY IF EXISTS "cal_manage" ON public.holiday_calendars;
 CREATE POLICY "cal_read" ON public.holiday_calendars
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+  FOR SELECT USING (auth.uid() IS NOT NULL AND public.can_see_office(office_id));
 CREATE POLICY "cal_manage" ON public.holiday_calendars
   FOR ALL USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'))
   WITH CHECK (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
@@ -1066,7 +1919,10 @@ CREATE POLICY "cal_manage" ON public.holiday_calendars
 DROP POLICY IF EXISTS "holidays_read"   ON public.public_holidays;
 DROP POLICY IF EXISTS "holidays_manage" ON public.public_holidays;
 CREATE POLICY "holidays_read" ON public.public_holidays
-  FOR SELECT USING (auth.uid() IS NOT NULL);
+  FOR SELECT USING (
+    auth.uid() IS NOT NULL
+    AND EXISTS (SELECT 1 FROM public.holiday_calendars hc WHERE hc.id = calendar_id AND public.can_see_office(hc.office_id))
+  );
 CREATE POLICY "holidays_manage" ON public.public_holidays
   FOR ALL USING (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'))
   WITH CHECK (public.my_has_role('hr_manage_calendar') OR public.my_has_role('it'));
@@ -1100,43 +1956,78 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
       OR public.my_has_role('employee_overview');
 $$;
 
--- Project memberships readable by HR-flag holders (Employee Overview needs this)
+-- Project memberships readable by HR-flag holders (Employee Overview needs this).
+-- The office check goes through this SECURITY DEFINER helper rather than a
+-- direct `FROM public.projects` in the policy body — projects' own
+-- "projects_read_member" policy reads project_members right back, so a
+-- direct reference here would re-trigger projects' RLS, which re-triggers
+-- this policy, forming a cycle Postgres rejects with 42P17 "infinite
+-- recursion detected in policy for relation projects". A function body
+-- runs as its owner and bypasses RLS on the table it reads, same as
+-- can_see_office()/my_has_role() already do for profiles.
+CREATE OR REPLACE FUNCTION public.project_office_id(p_project UUID)
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT office_id FROM public.projects WHERE id = p_project;
+$$;
+
 DROP POLICY IF EXISTS "members_read_privileged" ON public.project_members;
 CREATE POLICY "members_read_privileged" ON public.project_members
-  FOR SELECT USING (public.has_any_hr_flag());
+  FOR SELECT USING (
+    public.has_any_hr_flag()
+    AND public.can_see_office(public.project_office_id(project_id))
+  );
 
 -- Profiles: any HR-flag holder can read all profiles (employee pickers, names)
 DROP POLICY IF EXISTS "profiles_read_hr_flags" ON public.profiles;
 CREATE POLICY "profiles_read_hr_flags" ON public.profiles
-  FOR SELECT USING (public.has_any_hr_flag());
+  FOR SELECT USING (public.has_any_hr_flag() AND public.can_see_office(office_id));
 
 -- Timesheets + entries: the timesheet-view flag can read all
 DROP POLICY IF EXISTS "timesheets_read_hr_view" ON public.timesheets;
 CREATE POLICY "timesheets_read_hr_view" ON public.timesheets
-  FOR SELECT USING (public.my_has_role('hr_view_timesheets'));
+  FOR SELECT USING (
+    public.my_has_role('hr_view_timesheets')
+    AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
+  );
 
 DROP POLICY IF EXISTS "entries_read_hr_view" ON public.timesheet_entries;
 CREATE POLICY "entries_read_hr_view" ON public.timesheet_entries
-  FOR SELECT USING (public.my_has_role('hr_view_timesheets'));
+  FOR SELECT USING (
+    public.my_has_role('hr_view_timesheets')
+    AND timesheet_id IN (
+      SELECT t.id FROM public.timesheets t
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.can_see_office(pr.office_id)
+    )
+  );
 
 -- Projects + stages: HR-flag holders can read the catalogue for filters/labels
 DROP POLICY IF EXISTS "projects_read_hr_flags" ON public.projects;
 CREATE POLICY "projects_read_hr_flags" ON public.projects
-  FOR SELECT USING (public.has_any_hr_flag());
+  FOR SELECT USING (public.has_any_hr_flag() AND public.can_see_office(office_id));
 
 DROP POLICY IF EXISTS "stages_read_hr_flags" ON public.project_stages;
 CREATE POLICY "stages_read_hr_flags" ON public.project_stages
-  FOR SELECT USING (public.has_any_hr_flag());
+  FOR SELECT USING (
+    public.has_any_hr_flag()
+    AND EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_id AND public.can_see_office(p.office_id))
+  );
 
 -- Analytics roles can read the project/stage catalogue (for the Projects
 -- analytics tab). Timesheet-entry reads are already governed for these roles.
 DROP POLICY IF EXISTS "projects_read_analytics" ON public.projects;
 CREATE POLICY "projects_read_analytics" ON public.projects
-  FOR SELECT USING (public.my_has_role('global_analytics') OR public.my_has_role('team_analytics'));
+  FOR SELECT USING (
+    (public.my_has_role('global_analytics') OR public.my_has_role('team_analytics'))
+    AND public.can_see_office(office_id)
+  );
 
 DROP POLICY IF EXISTS "stages_read_analytics" ON public.project_stages;
 CREATE POLICY "stages_read_analytics" ON public.project_stages
-  FOR SELECT USING (public.my_has_role('global_analytics') OR public.my_has_role('team_analytics'));
+  FOR SELECT USING (
+    (public.my_has_role('global_analytics') OR public.my_has_role('team_analytics'))
+    AND EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_id AND public.can_see_office(p.office_id))
+  );
 
 -- ===============================================================
 -- PROJECT CONSTRAINTS & GOVERNANCE ENGINE
@@ -1442,7 +2333,7 @@ CREATE OR REPLACE FUNCTION public.create_project(
   p_name TEXT, p_description TEXT, p_tracking_type project_tracking_type,
   p_start DATE, p_end DATE, p_total_hours NUMERIC
 ) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_id UUID;
+DECLARE v_id UUID; v_office UUID;
 BEGIN
   IF NOT public.can_manage_projects() THEN RAISE EXCEPTION 'Not authorized.'; END IF;
   IF p_tracking_type IS DISTINCT FROM 'date' THEN
@@ -1451,8 +2342,11 @@ BEGIN
   IF p_start IS NULL THEN RAISE EXCEPTION 'A start date is required for a date-tracked project.'; END IF;
   IF p_end IS NOT NULL AND p_end < p_start THEN RAISE EXCEPTION 'End date cannot be before start date.'; END IF;
 
-  INSERT INTO public.projects (name, description, tracking_type, start_date, end_date, total_hours, created_by)
-  VALUES (p_name, NULLIF(trim(p_description), ''), 'date', p_start, p_end, NULL, auth.uid())
+  -- New projects take the creator's home office.
+  SELECT office_id INTO v_office FROM public.profiles WHERE id = auth.uid();
+
+  INSERT INTO public.projects (name, description, tracking_type, start_date, end_date, total_hours, created_by, office_id)
+  VALUES (p_name, NULLIF(trim(p_description), ''), 'date', p_start, p_end, NULL, auth.uid(), v_office)
   RETURNING id INTO v_id;
   RETURN v_id;
 END;

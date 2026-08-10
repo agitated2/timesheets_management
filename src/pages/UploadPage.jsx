@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, UserX,
   Calendar, ChevronDown, ChevronUp, AlertTriangle, XCircle,
-  Plus, Trash2, Briefcase, ChevronRight,
+  Plus, Trash2, Briefcase, ChevronRight, Maximize2, PenLine,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
@@ -11,6 +11,7 @@ import { canLogToStage, isStageSelectable } from '../lib/projectRules'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
+import SidePanel from '../components/SidePanel'
 import TimesheetPreview from '../components/TimesheetPreview'
 
 function fileToBase64(file) {
@@ -29,6 +30,34 @@ function calcHours(from, to) {
   let h = (th + tm / 60) - (fh + fm / 60)
   if (h < 0) h += 24
   return Math.round(h * 100) / 100
+}
+
+// Current wall-clock date + time in a given IANA zone, as plain strings —
+// not a Date object, since what we need to compare against a DATE+TIME
+// deadline is the office's own calendar date and clock time, not an
+// instant. formatToParts is read by `type`, not string position, so the
+// locale argument doesn't matter for correctness (only hour12 does).
+function officeLocalNow(timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date())
+  const map = Object.fromEntries(parts.map(p => [p.type, p.value]))
+  // hour12:false can still yield "24" for midnight in some ICU
+  // implementations — normalize so string comparison against "HH:MM"
+  // deadlines stays correct.
+  const hour = map.hour === '24' ? '00' : map.hour
+  return { date: `${map.year}-${map.month}-${map.day}`, time: `${hour}:${map.minute}` }
+}
+
+// '18:00:00' (Postgres TIME) → '6:00 PM' for display.
+function formatDeadline12h(t) {
+  if (!t) return null
+  const [h, m] = t.split(':')
+  const hour = Number(h)
+  const period = hour >= 12 ? 'PM' : 'AM'
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12
+  return `${hour12}:${m} ${period}`
 }
 
 // ── Manager gate ─────────────────────────────────────────────────
@@ -446,33 +475,173 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
   )
 }
 
-// ── Auto-growing task textarea ────────────────────────────────────
-// Height grows/shrinks with content (long task descriptions); column
-// widths stay fixed so rows stay aligned with the header above them.
-function AutoGrowTextarea({ value, onChange, placeholder, className }) {
-  const ref = useRef(null)
+// ── Select field (combobox) ──────────────────────────────────────
+// A plain <select>'s intrinsic width tracks its widest AVAILABLE option,
+// not the one currently picked — fixed browser behavior, not something CSS
+// can override. This is a button trigger that only ever renders the CURRENT
+// value, so its width (and therefore the shared subgrid column's width)
+// tracks what's actually selected instead of the worst case in the list.
+// Popup height cap, kept in sync with the panel's max-h-56 class below —
+// used to decide whether the panel has to open upward instead of down.
+const SELECT_PANEL_MAX_HEIGHT = 224
+
+function SelectField({ value, options, onChange, placeholder, disabled, className }) {
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState(null)
+  const triggerRef = useRef(null)
+  const panelRef = useRef(null)
+  const selected = options.find(o => o.id === value)
+
+  // Positioned `fixed` from the trigger's own screen rect, not `absolute`
+  // inside this component — every row lives inside DateCard's `overflow-hidden`
+  // card (needed for its rounded corners), which would clip an absolutely
+  // positioned popup. `fixed` escapes that entirely, same trick SidePanel
+  // uses to render above everything else.
+  function openDropdown() {
+    const rect = triggerRef.current.getBoundingClientRect()
+    const openUp = rect.bottom + SELECT_PANEL_MAX_HEIGHT > window.innerHeight
+      && rect.top > SELECT_PANEL_MAX_HEIGHT
+    setPos({
+      left: rect.left,
+      width: rect.width,
+      top: openUp ? undefined : rect.bottom + 4,
+      bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+    })
+    setOpen(true)
+  }
+
   useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [value])
+    if (!open) return
+    function onPointerDown(e) {
+      if (triggerRef.current?.contains(e.target)) return
+      if (panelRef.current?.contains(e.target)) return
+      setOpen(false)
+    }
+    function onKeyDown(e) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    // The panel's position is computed once, on open — rather than tracking
+    // scroll/resize live, just close it so it never sits somewhere stale.
+    // `capture: true` so this also catches scrolling inside a nested
+    // scrollable container, not just the window itself.
+    function onScrollOrResize() { setOpen(false) }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onScrollOrResize)
+    }
+  }, [open])
+
   return (
-    <textarea
-      ref={ref}
-      rows={1}
-      value={value}
-      onChange={onChange}
-      placeholder={placeholder}
-      className={clsx('input text-sm resize-none overflow-hidden leading-snug', className)}
-    />
+    <div className={clsx('relative min-w-0', className)}>
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        title={selected ? selected.name : placeholder}
+        onClick={() => (open ? setOpen(false) : openDropdown())}
+        className={clsx(
+          'input group flex items-center gap-1.5 text-left min-w-0 w-full',
+          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-gray-400 dark:hover:border-gray-500',
+        )}
+      >
+        <span className={clsx('truncate min-w-0 flex-1', !selected && 'text-gray-400 dark:text-gray-500')}>
+          {selected ? selected.name : placeholder}
+        </span>
+        <ChevronDown size={13} className="flex-shrink-0 text-gray-400" />
+      </button>
+
+      {open && pos && (
+        <div
+          ref={panelRef}
+          style={{ left: pos.left, top: pos.top, bottom: pos.bottom, minWidth: pos.width }}
+          className="fixed z-30 w-max max-w-[240px] max-h-56 overflow-y-auto rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg py-1"
+        >
+          {options.length === 0 ? (
+            <p className="px-3 py-1.5 text-sm text-gray-400 italic whitespace-nowrap">No options available</p>
+          ) : (
+            options.map(o => (
+              <button
+                key={o.id}
+                type="button"
+                onClick={() => { onChange(o.id); setOpen(false) }}
+                className={clsx(
+                  'block w-full text-left px-3 py-1.5 text-sm whitespace-nowrap hover:bg-gray-100 dark:hover:bg-gray-800',
+                  o.id === value ? 'font-medium text-ae7-red' : 'text-gray-700 dark:text-gray-200',
+                )}
+              >
+                {o.name}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
-// Shared column template for the entry grid header + every row, so they
-// always line up. Kept as one literal string (used verbatim in classNames
-// below) so Tailwind's content scanner picks up the arbitrary-value class.
-const ENTRY_GRID = 'sm:grid-cols-[1.3fr_1.1fr_1.1fr_84px_84px_60px_1.7fr_32px]'
+// ── Task cell ─────────────────────────────────────────────────────
+// Fixed-height, single-line trigger that opens the editor drawer. It wears
+// the plain `.input` class with NO line-height override, so it matches the
+// height of every sibling field exactly — the old auto-growing textarea set
+// `leading-snug` + `height = scrollHeight`, leaving it a few px short of the
+// row at one line and dragging the row taller with every wrap.
+function TaskCell({ value, placeholder, onOpen, className }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={value || placeholder}
+      className={clsx(
+        'input group flex items-center gap-2 text-left cursor-pointer min-w-0',
+        'hover:border-gray-400 dark:hover:border-gray-500',
+        'hover:bg-gray-50 dark:hover:bg-gray-800/70',
+        className,
+      )}
+    >
+      <span className={clsx('truncate flex-1 min-w-0', !value && 'text-gray-400 dark:text-gray-500')}>
+        {value || placeholder}
+      </span>
+      <Maximize2
+        size={13}
+        className="flex-shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity"
+      />
+    </button>
+  )
+}
+
+// Column template shared by the header row and every entry row. Each row
+// is its own `grid-template-columns: subgrid` (Tailwind's `grid-cols-subgrid`)
+// nested inside one parent grid (DateCard), so tracks size to the widest
+// content actually present in that column — across the header AND every
+// row — while staying aligned, instead of a hardcoded fr/px split.
+// Project/Stage/Discipline use SelectField (not a native <select>) precisely
+// so that content is the SELECTED value only: a native <select>'s intrinsic
+// width is set by its widest available <option> regardless of which one is
+// picked, which would make these columns static instead of dynamic.
+// Their max is capped (`minmax(floor, cap)`, not `minmax(floor, auto)`) —
+// an uncapped `auto` track has no upper bound and, unlike an `fr` track,
+// never shrinks back below its content size, so one long name picked in
+// any row would grow that column until the whole row overflows the card.
+// SelectField's own truncate/ellipsis (see its `title` attr for the full
+// value on hover) takes over once content exceeds the cap. Task is the
+// only flexible track, so it absorbs/gives up whatever space the capped
+// columns don't claim — its floor is 90px, NOT 0: `minmax(0,1fr)` lets the
+// TRACK shrink to nothing, but TaskCell's button still needs room for its
+// padding + icon once its text has truncated down to nothing, and those
+// can't compress further. Below that track floor the button's own
+// irreducible width would exceed what the track allocated it, and it
+// overflows rightward into the Hours cell next to it — not a shrink, a
+// visible overlap. Applied via inline style (not a Tailwind class) since
+// `minmax()` argument commas don't survive Tailwind's arbitrary-value
+// parsing.
+const ENTRY_GRID_COLS =
+  'minmax(110px,220px) minmax(90px,160px) minmax(90px,160px) minmax(96px,auto) minmax(96px,auto) minmax(90px,1fr) minmax(68px,auto) 32px'
 
 // ── In-App Entry ─────────────────────────────────────────────────
 function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
@@ -485,6 +654,13 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   const [dupError, setDupError]       = useState('')
   const [submitting, setSubmitting]   = useState(false)
   const [submitError, setSubmitError] = useState('')
+  const [office, setOffice]           = useState(null)  // { name, timezone, timesheet_deadline }
+
+  useEffect(() => {
+    if (!profile?.office_id) return
+    supabase.from('offices').select('name, timezone, timesheet_deadline').eq('id', profile.office_id).single()
+      .then(({ data }) => setOffice(data))
+  }, [profile?.office_id])
 
   useEffect(() => {
     async function load() {
@@ -768,14 +944,27 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
     )
   }
 
+  // Deadline is informational only — reporting rule, not a submission
+  // gate. It's evaluated against the OFFICE's local clock, not the
+  // browser's, same reasoning as everywhere else timezone matters here.
+  const officeNow = office ? officeLocalNow(office.timezone) : null
+  const isPastDeadlineToday = officeNow && office?.timesheet_deadline
+    && officeNow.time >= office.timesheet_deadline.slice(0, 5)
+  const enteringForToday = officeNow && dateEntries.some(de => de.date === officeNow.date)
+
   // ── Editing step ─────────────────────────────────────────────
   return (
-    <div className="max-w-2xl space-y-5">
+    <div className="max-w-4xl space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="page-title">Upload timesheet</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Add your entries for each date below.</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+            Add your entries for each date below.
+            {office?.timesheet_deadline && (
+              <> Daily deadline: <strong>{formatDeadline12h(office.timesheet_deadline)}</strong> ({office.timezone}).</>
+            )}
+          </p>
         </div>
         {xlsxEnabled && (
           <button onClick={onSwitchToExcel} className="text-sm text-gray-500 hover:text-ae7-red flex items-center gap-1.5 transition-colors">
@@ -783,6 +972,14 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
           </button>
         )}
       </div>
+
+      {/* Past-deadline notice — informational, never blocks submission */}
+      {isPastDeadlineToday && enteringForToday && (
+        <div className="flex items-start gap-2 text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 rounded-xl px-3 py-2">
+          <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+          It's currently past today's {formatDeadline12h(office.timesheet_deadline)} deadline — a timesheet submitted now for today will be recorded as late.
+        </div>
+      )}
 
       {/* Stage issue summary */}
       {hasStageIssues && (
@@ -893,27 +1090,33 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
       {de.entries.length === 0 ? (
         <p className="text-xs text-gray-400 italic px-5 py-3">No entries yet. Click "Add row" below.</p>
       ) : (
-        <>
+        // One grid spans the header + every row (each row is `grid-cols-subgrid`,
+        // see EntryRow) so `auto`-sized columns are computed across all of them
+        // together and stay aligned — a separate grid per row can't do that,
+        // each would size its own columns independently.
+        <div className="px-5 sm:grid sm:gap-x-3" style={{ gridTemplateColumns: ENTRY_GRID_COLS }}>
           {/* Column header (desktop only) */}
-          <div className={clsx('hidden sm:grid gap-2 px-5 pt-3 pb-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider', ENTRY_GRID)}>
-            <span>Project</span><span>Stage</span><span>Discipline</span>
-            <span>From</span><span>To</span><span>Hours</span><span>Task</span><span />
-          </div>
-          <div className="divide-y divide-gray-50 dark:divide-gray-800/60">
-            {de.entries.map(e => (
-              <EntryRow
-                key={e.id}
-                entry={e}
-                date={de.date}
-                projects={projects}
-                disciplines={disciplines}
-                onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
-                onRemove={() => onRemoveEntry(e.id)}
-                getStageWarning={getStageWarning}
-              />
-            ))}
-          </div>
-        </>
+          {['Project', 'Stage', 'Discipline', 'From', 'To', 'Task', 'Hours'].map(label => (
+            <span key={label} className="hidden sm:block pt-3 pb-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+              {label}
+            </span>
+          ))}
+          <span className="hidden sm:block" />
+
+          {de.entries.map((e, idx) => (
+            <EntryRow
+              key={e.id}
+              entry={e}
+              date={de.date}
+              projects={projects}
+              disciplines={disciplines}
+              onUpdate={(field, value) => onUpdateEntry(e.id, field, value)}
+              onRemove={() => onRemoveEntry(e.id)}
+              getStageWarning={getStageWarning}
+              isFirst={idx === 0}
+            />
+          ))}
+        </div>
       )}
 
       <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-800">
@@ -925,7 +1128,7 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
   )
 }
 
-function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getStageWarning }) {
+function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getStageWarning, isFirst }) {
   const selectedProject = projects.find(p => p.id === entry.projectId)
   const stages = selectedProject
     ? [...(selectedProject.project_stages || [])]
@@ -938,40 +1141,53 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
     : []
   const hours   = calcHours(entry.timeFrom, entry.timeTo)
   const warning = getStageWarning(entry, date)
+  const [taskOpen, setTaskOpen] = useState(false)
+
+  // The drawer covers the grid, so name the row it belongs to.
+  const selectedStage = stages.find(s => s.id === entry.stageId)
+  const taskContext = [
+    selectedProject?.name,
+    selectedStage?.name,
+    date ? format(parseISO(date), 'dd MMM yyyy') : null,
+  ].filter(Boolean).join(' · ')
 
   return (
-    <div className="px-5 py-3 space-y-2">
-      <div className={clsx('grid grid-cols-2 sm:grid gap-2 items-start', ENTRY_GRID)}>
+    // `grid-cols-subgrid` at sm+ inherits the parent DateCard grid's column
+    // tracks (see ENTRY_GRID_COLS) instead of defining its own, so this row's
+    // cells size and align together with every other row and the header.
+    // Below sm it's an ordinary 2-col grid, independent of the parent (which
+    // isn't a grid at all on mobile) — the stacked label/value layout is
+    // unchanged.
+    <div
+      className={clsx(
+        'grid grid-cols-2 sm:grid-cols-subgrid sm:col-span-full gap-x-3 gap-y-3 sm:gap-y-2 items-start py-3',
+        !isFirst && 'border-t border-gray-50 dark:border-gray-800/60',
+      )}
+    >
         <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Project *</div>
-        <select
+        <SelectField
           value={entry.projectId}
-          onChange={e => onUpdate('projectId', e.target.value)}
-          className="input text-sm"
-        >
-          <option value="">Select project…</option>
-          {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
+          options={projects}
+          onChange={v => onUpdate('projectId', v)}
+          placeholder="Project…"
+        />
 
         <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Stage *</div>
-        <select
+        <SelectField
           value={entry.stageId}
-          onChange={e => onUpdate('stageId', e.target.value)}
+          options={stages}
+          onChange={v => onUpdate('stageId', v)}
+          placeholder="Stage…"
           disabled={!entry.projectId}
-          className={clsx('input text-sm', !entry.projectId && 'opacity-50 cursor-not-allowed')}
-        >
-          <option value="">Select stage…</option>
-          {stages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        />
 
         <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Discipline *</div>
-        <select
+        <SelectField
           value={entry.disciplineId || ''}
-          onChange={e => onUpdate('disciplineId', e.target.value)}
-          className="input text-sm"
-        >
-          <option value="">Select discipline…</option>
-          {disciplines.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-        </select>
+          options={disciplines}
+          onChange={v => onUpdate('disciplineId', v)}
+          placeholder="Discipline…"
+        />
 
         <div className="sm:hidden text-xs font-medium text-gray-500">From *</div>
         <input type="time" value={entry.timeFrom} onChange={e => onUpdate('timeFrom', e.target.value)} className="input text-sm" />
@@ -979,18 +1195,18 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
         <div className="sm:hidden text-xs font-medium text-gray-500">To *</div>
         <input type="time" value={entry.timeTo} onChange={e => onUpdate('timeTo', e.target.value)} className="input text-sm" />
 
+        <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Task / Description *</div>
+        <TaskCell
+          value={entry.task}
+          placeholder="What did you work on?"
+          onOpen={() => setTaskOpen(true)}
+          className="col-span-2 sm:col-span-1"
+        />
+
         <div className="sm:hidden text-xs font-medium text-gray-500">Hours</div>
         <div className="input text-sm text-gray-500 dark:text-gray-400 flex items-center justify-center">
           {hours !== null ? `${hours}h` : '—'}
         </div>
-
-        <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">Task / Description *</div>
-        <AutoGrowTextarea
-          value={entry.task}
-          onChange={e => onUpdate('task', e.target.value)}
-          placeholder="What did you work on?"
-          className="col-span-2 sm:col-span-1"
-        />
 
         <button
           onClick={onRemove}
@@ -999,14 +1215,38 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
         >
           <Trash2 size={15} />
         </button>
-      </div>
 
-      {/* Stage warning (blocking) */}
-      {warning && (
-        <div className="flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
-          <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
-          {warning}
-        </div>
+        {/* Stage warning (blocking) */}
+        {warning && (
+          <div className="col-span-full flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
+            <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
+            {warning}
+          </div>
+        )}
+
+      {taskOpen && (
+        <SidePanel
+          title="Task / Description"
+          subtitle={taskContext || undefined}
+          icon={<PenLine size={15} className="text-ae7-red flex-shrink-0" />}
+          onClose={() => setTaskOpen(false)}
+          footer={
+            <button onClick={() => setTaskOpen(false)} className="btn-primary w-full">
+              Done
+            </button>
+          }
+        >
+          <div className="p-6">
+            <textarea
+              value={entry.task}
+              onChange={e => onUpdate('task', e.target.value)}
+              placeholder="What did you work on?"
+              rows={12}
+              autoFocus
+              className="input resize-none"
+            />
+          </div>
+        </SidePanel>
       )}
     </div>
   )

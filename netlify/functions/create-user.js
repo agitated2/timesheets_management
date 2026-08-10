@@ -30,20 +30,26 @@ exports.handler = async (event) => {
     const callerIsIT = callerProfile?.roles?.includes('it') || callerProfile?.role === 'it'
     if (!callerIsIT) return { statusCode: 403, headers, body: JSON.stringify({ error: 'IT role required' }) }
 
-    const { email, password, fullName, roles } = JSON.parse(event.body || '{}')
+    const { email, password, fullName, roles, officeId } = JSON.parse(event.body || '{}')
 
     if (!email?.trim()) return { statusCode: 400, headers, body: JSON.stringify({ error: 'Email is required' }) }
     if (!password || password.length < 6) return { statusCode: 400, headers, body: JSON.stringify({ error: 'Password must be at least 6 characters' }) }
+    if (!officeId) return { statusCode: 400, headers, body: JSON.stringify({ error: 'Office is required' }) }
 
-    // Create auth user — email_confirm: true skips verification email
+    // Create auth user — email_confirm: true skips verification email.
+    // office_id rides in on user_metadata: the profiles.office_id column is
+    // NOT NULL, and the handle_new_user() trigger reads it from here so the
+    // profile row is created with an office atomically — there is no safe
+    // window to backfill it afterwards.
     const { data, error: createErr } = await supabaseAdmin.auth.admin.createUser({
       email: email.trim().toLowerCase(),
       password,
       email_confirm: true,
+      user_metadata: { office_id: officeId },
     })
     if (createErr) return { statusCode: 400, headers, body: JSON.stringify({ error: createErr.message }) }
 
-    // The DB trigger creates the profile row automatically.
+    // The DB trigger creates the profile row automatically (incl. office_id).
     // Update name and/or role if provided.
     const profileUpdates = {}
     if (fullName?.trim()) profileUpdates.full_name = fullName.trim()

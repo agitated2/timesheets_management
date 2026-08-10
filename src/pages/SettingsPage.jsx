@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   User, Shield, Search, CheckCircle,
   Save, Info, Users, AlertCircle, Lock, Eye, EyeOff,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Building2,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
@@ -93,6 +93,7 @@ function Toast({ message, type }) {
 function ProfileSection({ profile, refreshProfile }) {
   const [name, setName]                   = useState(profile.full_name || '')
   const [assignedManagers, setAssignedMgrs] = useState([])
+  const [officeName, setOfficeName]       = useState('')
   const [saving, setSaving]               = useState(false)
   const [saved, setSaved]                 = useState(false)
   const hasChanges = name.trim() !== (profile.full_name || '')
@@ -110,6 +111,12 @@ function ProfileSection({ profile, refreshProfile }) {
       .then(({ data }) => { if (data) setAssignedMgrs(data) })
   }, [isEmployee, managerIds.join(',')])
 
+  useEffect(() => {
+    if (!profile.office_id) return
+    supabase.from('offices').select('name').eq('id', profile.office_id).single()
+      .then(({ data }) => setOfficeName(data?.name || ''))
+  }, [profile.office_id])
+
   async function save(e) {
     e.preventDefault()
     setSaving(true)
@@ -124,11 +131,17 @@ function ProfileSection({ profile, refreshProfile }) {
 
       <form onSubmit={save} className="space-y-4">
         {/* Read-only account info */}
-        <div className={clsx('grid grid-cols-1 gap-3', isIT ? 'sm:grid-cols-3' : 'sm:grid-cols-2')}>
+        <div className={clsx('grid grid-cols-1 gap-3', isIT ? 'sm:grid-cols-4' : 'sm:grid-cols-3')}>
           <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
             <p className="text-xs text-gray-400 mb-0.5">Email</p>
             <p className="text-sm font-medium truncate">{profile.email}</p>
           </div>
+          {officeName && (
+            <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
+              <p className="text-xs text-gray-400 mb-0.5 flex items-center gap-1"><Building2 size={11} /> Office</p>
+              <p className="text-sm font-medium truncate">{officeName}</p>
+            </div>
+          )}
           {isIT && (
             <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-3">
               <p className="text-xs text-gray-400 mb-0.5">Roles</p>

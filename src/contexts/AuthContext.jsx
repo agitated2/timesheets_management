@@ -17,11 +17,20 @@ export function AuthProvider({ children }) {
     setProfile(data ?? null)
   }, [])
 
+  // Lazy, self-scoped leave-cycle refresh: fires once per sign-in so an
+  // employee's rollover/reset happens on login even without pg_cron.
+  // Idempotent server-side (skipped if this cycle was already granted) and
+  // fire-and-forget — a failure here must never block auth.
+  const triggerLeaveCycle = useCallback((userId) => {
+    supabase.rpc('run_leave_cycle', { p_employee: userId }).catch(() => {})
+  }, [])
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null)
       if (session?.user) {
         fetchProfile(session.user.id).finally(() => setLoading(false))
+        triggerLeaveCycle(session.user.id)
       } else {
         setLoading(false)
       }
@@ -31,13 +40,14 @@ export function AuthProvider({ children }) {
       setUser(session?.user ?? null)
       if (session?.user) {
         fetchProfile(session.user.id)
+        if (_event === 'SIGNED_IN') triggerLeaveCycle(session.user.id)
       } else {
         setProfile(null)
       }
     })
 
     return () => subscription.unsubscribe()
-  }, [fetchProfile])
+  }, [fetchProfile, triggerLeaveCycle])
 
   const signOut = async () => {
     await supabase.auth.signOut()

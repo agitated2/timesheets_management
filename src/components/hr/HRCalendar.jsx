@@ -11,6 +11,13 @@ const ASSIGN_PAGE_SIZE = 10
 
 const DOW = [['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]]
 
+// Calendars are now tied 1:1 to an office (see migration_v10) — creating a
+// calendar here wouldn't set office_id, so it would never resolve for
+// anyone, and calendar_assignments is no longer consulted by
+// emp_calendar(). The create/assign/unassign UI is disabled rather than
+// deleted so it's easy to bring back if per-office 1:1 ever changes.
+const CALENDAR_ADMIN_ENABLED = false
+
 export default function HRCalendar() {
   const [calendars, setCalendars] = useState([])
   const [holidays, setHolidays]   = useState([])
@@ -141,10 +148,12 @@ export default function HRCalendar() {
             </button>
           ))}
         </div>
-        <form onSubmit={addCalendar} className="px-5 py-4 border-t border-gray-100 dark:border-gray-800 flex gap-2">
-          <input value={newCalName} onChange={e => setNewCalName(e.target.value)} placeholder="New calendar" className="input text-sm" required />
-          <button type="submit" disabled={!newCalName.trim()} className="btn-primary text-sm flex-shrink-0"><Plus size={14} /></button>
-        </form>
+        {CALENDAR_ADMIN_ENABLED && (
+          <form onSubmit={addCalendar} className="px-5 py-4 border-t border-gray-100 dark:border-gray-800 flex gap-2">
+            <input value={newCalName} onChange={e => setNewCalName(e.target.value)} placeholder="New calendar" className="input text-sm" required />
+            <button type="submit" disabled={!newCalName.trim()} className="btn-primary text-sm flex-shrink-0"><Plus size={14} /></button>
+          </form>
+        )}
       </div>
 
       {/* Selected calendar details */}
@@ -191,56 +200,60 @@ export default function HRCalendar() {
             </div>
           </div>
 
-          {/* Assign employees */}
-          <div className="card p-5 space-y-3">
-            <div className="flex items-center gap-2">
-              <Users size={15} className="text-gray-400" />
-              <h3 className="font-semibold text-sm">Assign employees</h3>
-              <span className="text-xs text-gray-400">{assignedCount} currently assigned</span>
-            </div>
-            <form onSubmit={assign} className="flex flex-col sm:flex-row gap-2">
-              <div className="flex-1">
-                <MultiSelect options={employeeOptions} value={assignEmps} onChange={setAssignEmps} placeholder="Select employees…" showSelectAll />
+          {CALENDAR_ADMIN_ENABLED && (
+            <>
+              {/* Assign employees */}
+              <div className="card p-5 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Users size={15} className="text-gray-400" />
+                  <h3 className="font-semibold text-sm">Assign employees</h3>
+                  <span className="text-xs text-gray-400">{assignedCount} currently assigned</span>
+                </div>
+                <form onSubmit={assign} className="flex flex-col sm:flex-row gap-2">
+                  <div className="flex-1">
+                    <MultiSelect options={employeeOptions} value={assignEmps} onChange={setAssignEmps} placeholder="Select employees…" showSelectAll />
+                  </div>
+                  <button type="submit" disabled={assignEmps.length === 0} className="btn-primary text-sm flex-shrink-0">
+                    <Check size={14} /> Assign to {selected.name}
+                  </button>
+                </form>
+                {assignMsg && <p className={clsx('text-xs', assignMsg.includes('Assigned') ? 'text-emerald-600' : 'text-red-500')}>{assignMsg}</p>}
               </div>
-              <button type="submit" disabled={assignEmps.length === 0} className="btn-primary text-sm flex-shrink-0">
-                <Check size={14} /> Assign to {selected.name}
-              </button>
-            </form>
-            {assignMsg && <p className={clsx('text-xs', assignMsg.includes('Assigned') ? 'text-emerald-600' : 'text-red-500')}>{assignMsg}</p>}
-          </div>
 
-          {/* Employees on this calendar */}
-          <div className="card overflow-hidden">
-            <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center gap-2">
-              <Users size={15} className="text-gray-400" />
-              <h3 className="font-semibold text-sm">Employees on {selected.name}</h3>
-              <span className="text-xs text-gray-400">{assignedHere.length}</span>
-            </div>
-            {assignedHere.length === 0 ? (
-              <p className="text-sm text-gray-400 text-center py-6">No employees on this calendar.</p>
-            ) : (
-              <div className="divide-y divide-gray-100 dark:divide-gray-800">
-                {assignShown.map(e => {
-                  const explicit = assignments.some(a => a.employee_id === e.id && a.calendar_id === selected.id)
-                  return (
-                    <div key={e.id} className="flex items-center justify-between gap-3 px-5 py-2.5">
-                      <div className="min-w-0">
-                        <p className="text-sm truncate">{e.full_name || e.email}</p>
-                        {selected.is_default && !explicit && <p className="text-xs text-gray-400">default (unassigned)</p>}
-                      </div>
-                      {!selected.is_default && (
-                        <button onClick={() => unassign(e.id)} title="Move back to default calendar"
-                          className="text-xs text-gray-500 hover:text-red-500 flex items-center gap-1">
-                          <X size={12} /> Unassign
-                        </button>
-                      )}
-                    </div>
-                  )
-                })}
+              {/* Employees on this calendar */}
+              <div className="card overflow-hidden">
+                <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center gap-2">
+                  <Users size={15} className="text-gray-400" />
+                  <h3 className="font-semibold text-sm">Employees on {selected.name}</h3>
+                  <span className="text-xs text-gray-400">{assignedHere.length}</span>
+                </div>
+                {assignedHere.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-6">No employees on this calendar.</p>
+                ) : (
+                  <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {assignShown.map(e => {
+                      const explicit = assignments.some(a => a.employee_id === e.id && a.calendar_id === selected.id)
+                      return (
+                        <div key={e.id} className="flex items-center justify-between gap-3 px-5 py-2.5">
+                          <div className="min-w-0">
+                            <p className="text-sm truncate">{e.full_name || e.email}</p>
+                            {selected.is_default && !explicit && <p className="text-xs text-gray-400">default (unassigned)</p>}
+                          </div>
+                          {!selected.is_default && (
+                            <button onClick={() => unassign(e.id)} title="Move back to default calendar"
+                              className="text-xs text-gray-500 hover:text-red-500 flex items-center gap-1">
+                              <X size={12} /> Unassign
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+                <Pagination page={assignCurrent} totalPages={assignTotalPages} onChange={setAssignPage} total={assignedHere.length} />
               </div>
-            )}
-            <Pagination page={assignCurrent} totalPages={assignTotalPages} onChange={setAssignPage} total={assignedHere.length} />
-          </div>
+            </>
+          )}
         </div>
       )}
     </div>

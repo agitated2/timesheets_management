@@ -6,6 +6,7 @@ import { Upload, Clock, CheckSquare, XCircle, Hourglass, TrendingUp, Users, File
 import { format, subDays } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
+import OfficeClock from '../components/OfficeClock'
 
 const statusConfig = {
   pending:  { label: 'Pending',  color: 'text-amber-600 dark:text-amber-400',   bg: 'bg-amber-50  dark:bg-amber-950/30',  icon: Hourglass },
@@ -269,8 +270,16 @@ function greeting() {
 export default function DashboardPage() {
   const { profile, hasRole } = useAuth()
   if (!profile) return null
-  if (hasRole('it') || hasRole('hr') || hasRole('c_suite')) return <GlobalDashboard profile={profile} />
-  if (hasRole('manager')) return <ManagerDashboard profile={profile} />
-  if (hasRole('employee')) return <EmployeeDashboard profile={profile} />
-  return <GlobalDashboard profile={profile} />
+
+  let Dashboard = GlobalDashboard
+  if (hasRole('it') || hasRole('hr') || hasRole('c_suite')) Dashboard = GlobalDashboard
+  else if (hasRole('manager')) Dashboard = ManagerDashboard
+  else if (hasRole('employee')) Dashboard = EmployeeDashboard
+
+  return (
+    <div className="space-y-4">
+      <OfficeClock />
+      <Dashboard profile={profile} />
+    </div>
+  )
 }

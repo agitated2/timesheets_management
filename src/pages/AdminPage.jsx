@@ -4,14 +4,42 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   Shield, Search, CheckCircle, XCircle, UserPlus, Trash2, X,
   Eye, EyeOff, AlertTriangle, Pencil, FileText, ChevronDown,
-  ChevronUp, Calendar, Check, ChevronLeft, ChevronRight,
+  ChevronUp, Calendar, Check, ChevronLeft, ChevronRight, RefreshCw,
+  Clock, Send,
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
 import { SkeletonList } from '../components/Skeleton'
+import MultiSelect from '../components/MultiSelect'
 
 const PAGE_SIZE = 10
+
+// Curated, not the full ~600-entry IANA tz database — every "today"/"late"
+// decision the reminder job makes depends on this being a real zone name
+// (validated server-side too, see guard_office_timezone in migration_v13).
+const TIMEZONE_OPTIONS = [
+  { value: 'Asia/Dubai',      label: 'Dubai / Abu Dhabi (GST, UTC+4)' },
+  { value: 'Asia/Amman',      label: 'Amman (UTC+3)' },
+  { value: 'Asia/Riyadh',     label: 'Riyadh (AST, UTC+3)' },
+  { value: 'Asia/Kuwait',     label: 'Kuwait City (AST, UTC+3)' },
+  { value: 'Asia/Qatar',      label: 'Doha (AST, UTC+3)' },
+  { value: 'Asia/Bahrain',    label: 'Manama (AST, UTC+3)' },
+  { value: 'Asia/Muscat',     label: 'Muscat (GST, UTC+4)' },
+  { value: 'Africa/Cairo',    label: 'Cairo (EET, UTC+2)' },
+  { value: 'Asia/Karachi',    label: 'Karachi (PKT, UTC+5)' },
+  { value: 'Asia/Kolkata',    label: 'Mumbai / Delhi (IST, UTC+5:30)' },
+  { value: 'Asia/Dhaka',      label: 'Dhaka (BST, UTC+6)' },
+  { value: 'Asia/Singapore',  label: 'Singapore (SGT, UTC+8)' },
+  { value: 'Asia/Manila',     label: 'Manila (PST, UTC+8)' },
+  { value: 'Europe/London',   label: 'London (GMT/BST)' },
+  { value: 'Europe/Paris',    label: 'Paris / Berlin (CET/CEST)' },
+  { value: 'America/New_York', label: 'New York (ET)' },
+  { value: 'America/Chicago',  label: 'Chicago (CT)' },
+  { value: 'America/Los_Angeles', label: 'Los Angeles (PT)' },
+  { value: 'Australia/Sydney', label: 'Sydney (AET)' },
+  { value: 'UTC',             label: 'UTC' },
+]
 
 function Pagination({ page, totalPages, onChange }) {
   if (totalPages <= 1) return null
@@ -80,11 +108,12 @@ async function getSession() {
 }
 
 // ── Create User Modal ─────────────────────────────────────────────
-function CreateUserModal({ onClose, onCreated }) {
+function CreateUserModal({ offices, onClose, onCreated }) {
   const [email, setEmail]           = useState('')
   const [password, setPassword]     = useState('')
   const [confirmPw, setConfirmPw]   = useState('')
   const [fullName, setFullName]     = useState('')
+  const [officeId, setOfficeId]     = useState('')
   const [roles, setRoles]           = useState(['employee'])
   const [showPw, setShowPw]         = useState(false)
   const [loading, setLoading]       = useState(false)
@@ -99,13 +128,14 @@ function CreateUserModal({ onClose, onCreated }) {
     setError('')
     if (password !== confirmPw) { setError('Passwords do not match.'); return }
     if (roles.length === 0) { setError('Select at least one role.'); return }
+    if (!officeId) { setError('Select an office.'); return }
     setLoading(true)
     try {
       const session = await getSession()
       const res = await fetch('/.netlify/functions/create-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles }),
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles, officeId }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -135,6 +165,13 @@ function CreateUserModal({ onClose, onCreated }) {
 
         <Field label="Full name">
           <input type="text" value={fullName} onChange={e => setFullName(e.target.value)} className="input" placeholder="Jane Smith" />
+        </Field>
+
+        <Field label="Office *">
+          <select value={officeId} onChange={e => setOfficeId(e.target.value)} className="input" required>
+            <option value="">Select office…</option>
+            {offices.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </select>
         </Field>
 
         <Field label="Password *">
@@ -503,6 +540,528 @@ function UserTimesheetsModal({ user: target, onClose, onDeleted }) {
   )
 }
 
+// ── Offices tab ──────────────────────────────────────────────────
+function OfficeSettingsPanel({ office, onSaved, showToast }) {
+  const [timezone, setTimezone] = useState(office.timezone || 'Asia/Dubai')
+  const [deadline, setDeadline] = useState((office.timesheet_deadline || '18:00').slice(0, 5))
+  const [saving, setSaving]     = useState(false)
+
+  const dirty = timezone !== (office.timezone || 'Asia/Dubai') || deadline !== (office.timesheet_deadline || '18:00').slice(0, 5)
+
+  async function save() {
+    setSaving(true)
+    const { error } = await supabase.rpc('upsert_office', {
+      p_id: office.id, p_name: office.name, p_is_active: office.is_active,
+      p_timezone: timezone, p_deadline: deadline,
+    })
+    setSaving(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    showToast('Office settings saved.')
+    onSaved()
+  }
+
+  return (
+    <div className="px-5 py-3 space-y-3 bg-gray-50 dark:bg-gray-800/50">
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="Timezone">
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className="input text-sm">
+            {TIMEZONE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Daily timesheet deadline">
+          <input type="time" value={deadline} onChange={e => setDeadline(e.target.value)} className="input text-sm" />
+        </Field>
+      </div>
+      <p className="text-xs text-gray-400">
+        Timesheets submitted after this time (in the office's own timezone) are flagged as late in the daily reminder — submission is never blocked.
+      </p>
+      <button onClick={save} disabled={saving || !dirty} className="btn-primary text-xs px-3 py-1.5">
+        {saving ? '…' : <><Check size={13} /> Save</>}
+      </button>
+    </div>
+  )
+}
+
+function OfficeRow({ office, onSaved, showToast }) {
+  const [editing, setEditing]   = useState(false)
+  const [name, setName]         = useState(office.name)
+  const [saving, setSaving]     = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+
+  async function rename() {
+    if (!name.trim() || name.trim() === office.name) { setEditing(false); setName(office.name); return }
+    setSaving(true)
+    const { error } = await supabase.rpc('upsert_office', { p_id: office.id, p_name: name.trim(), p_is_active: office.is_active })
+    setSaving(false)
+    setEditing(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    onSaved()
+  }
+
+  async function toggleActive() {
+    setSaving(true)
+    const { error } = await supabase.rpc('upsert_office', { p_id: office.id, p_name: office.name, p_is_active: !office.is_active })
+    setSaving(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    onSaved()
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 px-5 py-3">
+        {editing ? (
+          <input
+            autoFocus value={name} onChange={e => setName(e.target.value)}
+            onBlur={rename} onKeyDown={e => { if (e.key === 'Enter') rename(); if (e.key === 'Escape') { setEditing(false); setName(office.name) } }}
+            className="input text-sm py-1 max-w-[220px]"
+          />
+        ) : (
+          <button onClick={() => setEditing(true)} className="flex items-center gap-2 text-left group">
+            <span className={clsx('text-sm font-medium', !office.is_active && 'text-gray-400 line-through')}>{office.name}</span>
+            <Pencil size={11} className="text-gray-300 group-hover:text-gray-500 transition-colors" />
+          </button>
+        )}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={() => setShowSettings(s => !s)}
+            title="Timezone & deadline"
+            className={clsx('p-1.5 rounded-md transition-colors', showSettings ? 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200' : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800')}
+          >
+            <Clock size={13} />
+          </button>
+          <button
+            onClick={toggleActive}
+            disabled={saving}
+            className={clsx('text-xs font-medium px-2 py-0.5 rounded-full transition-colors',
+              office.is_active
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 hover:bg-emerald-200'
+                : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 hover:bg-gray-200')}
+          >
+            {office.is_active ? 'Active' : 'Inactive'}
+          </button>
+        </div>
+      </div>
+      {showSettings && <OfficeSettingsPanel office={office} onSaved={onSaved} showToast={showToast} />}
+    </div>
+  )
+}
+
+function EmployeeOfficeEditor({ employee, offices, onSaved, showToast }) {
+  const [additional, setAdditional] = useState(employee.additional_office_ids || [])
+  const [seesAll, setSeesAll]       = useState(!!employee.sees_all_offices)
+  const [saving, setSaving]         = useState(false)
+
+  const otherOffices = offices.filter(o => o.id !== employee.office_id).map(o => ({ value: o.id, label: o.name }))
+  const dirty = JSON.stringify([...additional].sort()) !== JSON.stringify([...(employee.additional_office_ids || [])].sort())
+    || seesAll !== !!employee.sees_all_offices
+
+  async function save() {
+    setSaving(true)
+    const { error } = await supabase.rpc('set_employee_offices', {
+      p_employees: [employee.id], p_home: employee.office_id, p_additional: additional, p_sees_all: seesAll,
+    })
+    setSaving(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    onSaved()
+  }
+
+  return (
+    <div className="px-5 py-3 space-y-2 bg-gray-50 dark:bg-gray-800/50">
+      <Field label="Additional offices">
+        <MultiSelect options={otherOffices} value={additional} onChange={setAdditional} placeholder="None" />
+      </Field>
+      <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer">
+        <Checkbox checked={seesAll} onChange={() => setSeesAll(v => !v)} />
+        Sees all offices (bypasses office restrictions entirely)
+      </label>
+      <button onClick={save} disabled={saving || !dirty} className="btn-primary text-xs px-3 py-1.5">
+        {saving ? '…' : <><Check size={13} /> Save</>}
+      </button>
+    </div>
+  )
+}
+
+function OfficesTab({ offices, users, onOfficesChanged, showToast }) {
+  const [newName, setNewName]           = useState('')
+  const [creating, setCreating]         = useState(false)
+  const [bulkOffice, setBulkOffice]     = useState('')
+  const [bulkEmployees, setBulkEmployees] = useState([])
+  const [bulkSaving, setBulkSaving]     = useState(false)
+  const [rosterOffice, setRosterOffice] = useState('')
+  const [rosterSearch, setRosterSearch] = useState('')
+  const [rosterPage, setRosterPage]     = useState(1)
+  const [expanded, setExpanded]         = useState(null)
+
+  const officeName = new Map(offices.map(o => [o.id, o.name]))
+  const employeeOptions = users.map(u => ({ value: u.id, label: u.full_name || u.email, sublabel: u.email }))
+
+  async function createOffice(e) {
+    e.preventDefault()
+    if (!newName.trim()) return
+    setCreating(true)
+    const { error } = await supabase.rpc('upsert_office', { p_id: null, p_name: newName.trim(), p_is_active: true })
+    setCreating(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    setNewName('')
+    onOfficesChanged()
+  }
+
+  async function assignBulk() {
+    if (!bulkOffice || bulkEmployees.length === 0) return
+    setBulkSaving(true)
+    const { error } = await supabase.rpc('set_employee_offices', {
+      p_employees: bulkEmployees, p_home: bulkOffice, p_additional: null, p_sees_all: null,
+    })
+    setBulkSaving(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    setBulkEmployees([])
+    showToast(`Home office set for ${bulkEmployees.length} employee${bulkEmployees.length !== 1 ? 's' : ''}.`)
+    onOfficesChanged()
+  }
+
+  const rosterAll = rosterOffice ? users.filter(u => u.office_id === rosterOffice) : []
+  const rosterFiltered = rosterAll.filter(u => {
+    if (!rosterSearch) return true
+    const q = rosterSearch.toLowerCase()
+    return (u.full_name || '').toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+  })
+  const rosterTotalPages = Math.max(1, Math.ceil(rosterFiltered.length / PAGE_SIZE))
+  const rosterCurrentPage = Math.min(rosterPage, rosterTotalPages)
+  const rosterShown = rosterFiltered.slice((rosterCurrentPage - 1) * PAGE_SIZE, rosterCurrentPage * PAGE_SIZE)
+
+  return (
+    <div className="space-y-6">
+      <div className="card overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800">
+          <h2 className="font-semibold text-sm">Offices</h2>
+          <p className="text-xs text-gray-400 mt-0.5">Every profile and project belongs to one home office. Click a name to rename it.</p>
+        </div>
+        <form onSubmit={createOffice} className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 flex gap-2">
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New office name (e.g. Dubai)" className="input text-sm flex-1" />
+          <button type="submit" disabled={creating || !newName.trim()} className="btn-primary text-sm flex-shrink-0">
+            <UserPlus size={14} /> Add
+          </button>
+        </form>
+        <div className="divide-y divide-gray-100 dark:divide-gray-800">
+          {offices.length === 0 ? (
+            <p className="text-sm text-gray-400 text-center py-8">No offices yet.</p>
+          ) : offices.map(o => (
+            <OfficeRow key={o.id} office={o} onSaved={onOfficesChanged} showToast={showToast} />
+          ))}
+        </div>
+      </div>
+
+      <div className="card p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-sm">Bulk-assign home office</h2>
+          <p className="text-xs text-gray-400 mt-0.5">Moves the selected employees' home office. Their additional offices and sees-all-offices flag are left untouched.</p>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <Field label="Office">
+            <select value={bulkOffice} onChange={e => setBulkOffice(e.target.value)} className="input text-sm">
+              <option value="">Select office…</option>
+              {offices.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Employees">
+            <MultiSelect options={employeeOptions} value={bulkEmployees} onChange={setBulkEmployees} placeholder="Select employees…" showSelectAll />
+          </Field>
+        </div>
+        <button onClick={assignBulk} disabled={bulkSaving || !bulkOffice || bulkEmployees.length === 0} className="btn-primary text-sm">
+          {bulkSaving ? '…' : <><Check size={14} /> Assign {bulkEmployees.length > 0 ? bulkEmployees.length : ''}</>}
+        </button>
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-100 dark:border-gray-800 space-y-3">
+          <div>
+            <h2 className="font-semibold text-sm">Roster</h2>
+            <p className="text-xs text-gray-400 mt-0.5">Pick an office to see who calls it home, and set additional offices or sees-all-offices per employee.</p>
+          </div>
+          <div className="flex gap-2">
+            <select value={rosterOffice} onChange={e => { setRosterOffice(e.target.value); setRosterPage(1); setExpanded(null) }} className="input text-sm flex-shrink-0 max-w-[200px]">
+              <option value="">Select office…</option>
+              {offices.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+            {rosterOffice && (
+              <div className="relative flex-1">
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  value={rosterSearch} onChange={e => { setRosterSearch(e.target.value); setRosterPage(1) }}
+                  placeholder="Search…" className="input text-sm pl-8 py-1.5"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+        {!rosterOffice ? (
+          <p className="text-sm text-gray-400 text-center py-8">Select an office to view its roster.</p>
+        ) : rosterShown.length === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-8">No employees found.</p>
+        ) : (
+          <div className="divide-y divide-gray-100 dark:divide-gray-800">
+            {rosterShown.map(u => (
+              <div key={u.id}>
+                <button
+                  onClick={() => setExpanded(prev => prev === u.id ? null : u.id)}
+                  className="w-full flex items-center justify-between gap-3 px-5 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{u.full_name || u.email}</p>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {(u.additional_office_ids || []).map(id => (
+                        <span key={id} className="text-xs px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500">
+                          +{officeName.get(id) || '—'}
+                        </span>
+                      ))}
+                      {u.sees_all_offices && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full bg-ae7-light text-ae7-red dark:bg-ae7-red/10">
+                          Sees all offices
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {expanded === u.id ? <ChevronUp size={14} className="text-gray-400 flex-shrink-0" /> : <ChevronDown size={14} className="text-gray-400 flex-shrink-0" />}
+                </button>
+                {expanded === u.id && (
+                  <EmployeeOfficeEditor employee={u} offices={offices} onSaved={onOfficesChanged} showToast={showToast} />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <Pagination page={rosterCurrentPage} totalPages={rosterTotalPages} onChange={setRosterPage} />
+      </div>
+    </div>
+  )
+}
+
+// ── Reminder settings card (Settings tab) ──────────────────────────
+function ReminderSettingsCard({ settings, profileId, users, showToast, onSaved }) {
+  const [hour, setHour]     = useState(settings?.reminder_hour ?? 9)
+  const [backlog, setBacklog] = useState(settings?.reminder_backlog_days ?? 14)
+  const [saving, setSaving] = useState(false)
+  const [testSending, setTestSending] = useState(false)
+  const [testUserId, setTestUserId] = useState('')   // '' = preview the logged-in admin
+  const [testEmail, setTestEmail]   = useState('')   // '' = deliver to that user's own (possibly fake) email
+
+  // settings loads asynchronously after this component first mounts, so
+  // the useState initializer above only sees it on the lucky render where
+  // it's already resolved — sync local state whenever the loaded value
+  // actually changes (initial load, and after a save round-trips through
+  // the parent's reload).
+  useEffect(() => {
+    if (!settings) return
+    setHour(settings.reminder_hour)
+    setBacklog(settings.reminder_backlog_days)
+  }, [settings?.reminder_hour, settings?.reminder_backlog_days])
+
+  const dirty = Number(hour) !== settings?.reminder_hour || Number(backlog) !== settings?.reminder_backlog_days
+
+  async function toggleEnabled() {
+    if (!settings) return
+    setSaving(true)
+    const next = !settings.reminder_enabled
+    const { error } = await supabase
+      .from('app_settings')
+      .update({ reminder_enabled: next, updated_by: profileId })
+      .eq('id', 1)
+    setSaving(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    showToast(next ? 'Timesheet reminders enabled.' : 'Timesheet reminders disabled.')
+    onSaved()
+  }
+
+  async function saveNumbers() {
+    setSaving(true)
+    const { error } = await supabase
+      .from('app_settings')
+      .update({ reminder_hour: Number(hour), reminder_backlog_days: Number(backlog), updated_by: profileId })
+      .eq('id', 1)
+    setSaving(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    showToast('Reminder settings saved.')
+    onSaved()
+  }
+
+  // Fires a one-off email to the current admin using today's live data,
+  // bypassing both the hourly send-time gate and reminder_log's once-per-
+  // day guarantee — otherwise every config tweak costs a full day's wait
+  // to see whether it worked.
+  async function sendTest() {
+    setTestSending(true)
+    const { data, error } = await supabase.functions.invoke('test-timesheet-reminder', {
+      body: {
+        targetUserId: testUserId || undefined,
+        deliverTo: testEmail.trim() || undefined,
+      },
+    })
+    setTestSending(false)
+    if (error) {
+      // On a non-2xx response supabase-js returns data: null and puts the
+      // raw Response on error.context — our function's own { error } body
+      // (the actually useful message) lives there, not on `error` itself.
+      let message = error.message
+      if (error.context?.json) {
+        try { message = (await error.context.json())?.error || message } catch { /* body wasn't JSON */ }
+      }
+      showToast('Error: ' + message)
+      return
+    }
+    showToast(`Sent to ${data.to} — previewing ${data.previewing} (${data.ownRows} of theirs, ${data.teamRows} team, ${data.officeRows} office rows).`)
+  }
+
+  return (
+    <div className="card p-5 space-y-4 max-w-lg">
+      <div>
+        <h2 className="font-semibold text-sm mb-1">Timesheet reminders</h2>
+        <p className="text-xs text-gray-400">
+          Each morning, employees with outstanding timesheets — and their managers and HR — get an emailed summary. Sent once per person per day, at the hour below in THEIR OWN office's timezone.
+        </p>
+      </div>
+      <div className="flex items-center justify-between gap-4 py-2">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Send daily reminders</p>
+          <p className="text-xs text-gray-400 mt-0.5">Off disables the whole job — nothing is sent or logged.</p>
+        </div>
+        <button
+          onClick={toggleEnabled}
+          disabled={saving || !settings}
+          role="switch"
+          aria-checked={!!settings?.reminder_enabled}
+          className={clsx(
+            'relative w-11 h-6 rounded-full transition-colors flex-shrink-0 disabled:opacity-50',
+            settings?.reminder_enabled ? 'bg-ae7-red' : 'bg-gray-300 dark:bg-gray-700'
+          )}
+        >
+          <span className={clsx('absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform', settings?.reminder_enabled && 'translate-x-5')} />
+        </button>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="Send hour (office-local)">
+          <input type="number" min="0" max="23" value={hour} onChange={e => setHour(e.target.value)} className="input text-sm" />
+        </Field>
+        <Field label="Backlog window (days)">
+          <input type="number" min="1" max="90" value={backlog} onChange={e => setBacklog(e.target.value)} className="input text-sm" />
+        </Field>
+      </div>
+      <button onClick={saveNumbers} disabled={saving || !dirty} className="btn-secondary text-sm">
+        {saving ? '…' : <><Check size={14} /> Save</>}
+      </button>
+
+      <div className="border-t border-gray-100 dark:border-gray-800 pt-4 space-y-3">
+        <div>
+          <p className="text-sm font-medium">Send a test email</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Builds a real report for the selected user (their own/team/office rows, right now) and sends it once — never logged, never blocked by the once-per-day guarantee. Useful since the emails in your data may not be real mailboxes: leave "Deliver to" blank to send to that user's own address, or override it to route the preview anywhere you can actually check.
+          </p>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <Field label="Preview as">
+            <select value={testUserId} onChange={e => setTestUserId(e.target.value)} className="input text-sm">
+              <option value="">Me</option>
+              {[...users].sort((a, b) => (a.full_name || a.email).localeCompare(b.full_name || b.email)).map(u => (
+                <option key={u.id} value={u.id}>{u.full_name || u.email}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Deliver to (optional)">
+            <input
+              type="email"
+              value={testEmail}
+              onChange={e => setTestEmail(e.target.value)}
+              placeholder="defaults to their own email"
+              className="input text-sm"
+            />
+          </Field>
+        </div>
+        <button onClick={sendTest} disabled={testSending} className="btn-secondary text-sm">
+          {testSending ? '…' : <><Send size={14} /> Send test email</>}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Reminder log viewer (Settings tab) ──────────────────────────────
+const REMINDER_LOG_WINDOW_HOURS = 48
+
+function ReminderLogCard() {
+  const [rows, setRows]       = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState('')
+
+  useEffect(() => { load() }, [])
+
+  async function load() {
+    setLoading(true)
+    setError('')
+    const { data, error: err } = await supabase.rpc('reminder_log_recent', { p_hours: REMINDER_LOG_WINDOW_HOURS })
+    setLoading(false)
+    if (err) { setError(err.message); return }
+    setRows(data || [])
+  }
+
+  const sent   = rows.filter(r => r.status === 'sent').length
+  const failed = rows.filter(r => r.status === 'failed').length
+  const pending = rows.filter(r => r.status === 'pending').length
+
+  const statusColor = {
+    sent: 'text-emerald-600 dark:text-emerald-400',
+    failed: 'text-red-600 dark:text-red-400',
+    pending: 'text-amber-600 dark:text-amber-400',
+  }
+
+  return (
+    <div className="card p-5 space-y-4 max-w-2xl">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="font-semibold text-sm mb-1">Recent reminder runs</h2>
+          <p className="text-xs text-gray-400">
+            Last {REMINDER_LOG_WINDOW_HOURS} hours — {sent} sent, {failed} failed{pending ? `, ${pending} pending` : ''}.
+          </p>
+        </div>
+        <button onClick={load} disabled={loading} className="btn-secondary text-xs flex-shrink-0">
+          <RefreshCw size={13} className={clsx(loading && 'animate-spin')} /> Refresh
+        </button>
+      </div>
+
+      <ErrorBox msg={error} />
+
+      {!loading && rows.length === 0 && !error && (
+        <p className="text-sm text-gray-400 py-4 text-center">No reminder activity in this window.</p>
+      )}
+
+      {rows.length > 0 && (
+        <div className="max-h-80 overflow-y-auto -mx-1">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-400 border-b border-gray-100 dark:border-gray-800">
+                <th className="px-1 py-1.5 font-medium">Recipient</th>
+                <th className="px-1 py-1.5 font-medium">Business date</th>
+                <th className="px-1 py-1.5 font-medium">Status</th>
+                <th className="px-1 py-1.5 font-medium">Sent at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id} className="border-b border-gray-50 dark:border-gray-800/50">
+                  <td className="px-1 py-1.5">{r.recipient_email}</td>
+                  <td className="px-1 py-1.5">{r.business_date}</td>
+                  <td className={clsx('px-1 py-1.5 font-medium', statusColor[r.status])} title={r.error || ''}>
+                    {r.status}
+                  </td>
+                  <td className="px-1 py-1.5 text-gray-400">{format(new Date(r.sent_at), 'dd MMM HH:mm')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────
 export default function AdminPage() {
   const { profile }                       = useAuth()
@@ -520,12 +1079,27 @@ export default function AdminPage() {
   const [deleting, setDeleting]           = useState(false)
   const [settings, setSettings]           = useState(null)
   const [savingSettings, setSavingSettings] = useState(false)
+  const [offices, setOffices]             = useState([])
+  const [cycleRunning, setCycleRunning]   = useState(false)
 
-  useEffect(() => { loadUsers(); loadPending(); loadSettings() }, [])
+  useEffect(() => { loadUsers(); loadPending(); loadSettings(); loadOffices() }, [])
 
   async function loadSettings() {
     const { data } = await supabase.from('app_settings').select('*').eq('id', 1).single()
     setSettings(data)
+  }
+
+  async function loadOffices() {
+    const { data } = await supabase.from('offices').select('*').order('name')
+    if (data) setOffices(data)
+  }
+
+  async function runLeaveCycle() {
+    setCycleRunning(true)
+    const { data, error } = await supabase.rpc('run_leave_cycle', { p_employee: null })
+    setCycleRunning(false)
+    if (error) { showToast('Error: ' + error.message); return }
+    showToast(`Leave cycle done — ${data} balance${data === 1 ? '' : 's'} granted or refreshed, across all offices.`)
   }
 
   async function toggleXlsxUpload() {
@@ -611,6 +1185,7 @@ export default function AdminPage() {
 
       {showCreateModal && (
         <CreateUserModal
+          offices={offices}
           onClose={() => setShowCreate(false)}
           onCreated={() => { loadUsers(); showToast('User account created.') }}
         />
@@ -641,7 +1216,12 @@ export default function AdminPage() {
       </div>
 
       <Tabs
-        tabs={[{ key: 'users', label: 'Users' }, { key: 'timesheets', label: 'Timesheets' }, { key: 'settings', label: 'Settings' }]}
+        tabs={[
+          { key: 'users', label: 'Users' },
+          { key: 'timesheets', label: 'Timesheets' },
+          { key: 'offices', label: 'Offices' },
+          { key: 'settings', label: 'Settings' },
+        ]}
         active={activeTab}
         onChange={setActiveTab}
       />
@@ -817,7 +1397,17 @@ export default function AdminPage() {
         </div>
       )}
 
+      {activeTab === 'offices' && (
+        <OfficesTab
+          offices={offices}
+          users={users}
+          onOfficesChanged={() => { loadOffices(); loadUsers() }}
+          showToast={showToast}
+        />
+      )}
+
       {activeTab === 'settings' && (
+        <div className="space-y-6">
         <div className="card p-5 space-y-4 max-w-lg">
           <div>
             <h2 className="font-semibold text-sm mb-1">Timesheet entry</h2>
@@ -849,6 +1439,23 @@ export default function AdminPage() {
             </button>
           </div>
         </div>
+
+        <div className="card p-5 space-y-4 max-w-lg">
+          <div>
+            <h2 className="font-semibold text-sm mb-1">Leave cycle</h2>
+            <p className="text-xs text-gray-400">
+              Grants or refreshes every employee's leave balance for their current anniversary cycle, across every office. Safe to run repeatedly — already-granted cycles are skipped.
+            </p>
+          </div>
+          <button onClick={runLeaveCycle} disabled={cycleRunning} className="btn-secondary text-sm">
+            <RefreshCw size={14} className={clsx(cycleRunning && 'animate-spin')} />
+            {cycleRunning ? 'Running…' : 'Run leave cycle for all offices'}
+          </button>
+        </div>
+
+        <ReminderSettingsCard settings={settings} profileId={profile.id} users={users} onSaved={loadSettings} showToast={showToast} />
+        <ReminderLogCard />
+        </div>
       )}
     </div>
   )
@@ -859,8 +1466,8 @@ export default function AdminPage() {
 function Modal({ title, icon, onClose, children, wide = false }) {
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className={clsx('bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-800 w-full', wide ? 'max-w-lg' : 'max-w-md')}>
-        <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 dark:border-gray-800">
+      <div className={clsx('bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-800 w-full flex flex-col max-h-[90vh]', wide ? 'max-w-lg' : 'max-w-md')}>
+        <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
           <div className="flex items-center gap-2">
             {icon}
             <h3 className="font-semibold text-sm">{title}</h3>
@@ -869,7 +1476,9 @@ function Modal({ title, icon, onClose, children, wide = false }) {
             <X size={18} />
           </button>
         </div>
-        {children}
+        <div className="overflow-y-auto">
+          {children}
+        </div>
       </div>
     </div>
   )
