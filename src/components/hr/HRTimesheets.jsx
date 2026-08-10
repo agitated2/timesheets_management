@@ -108,6 +108,10 @@ export default function HRTimesheets() {
   const [projFilter, setProjFilter] = useState([])
   const [stageFilter, setStageFilter] = useState([])
   const [officeFilter, setOfficeFilter] = useState([])
+  // Real timesheets.status values only. Days with NO timesheet at all
+  // ('missing') can't appear here — this tab lists submitted work; see
+  // the Compliance tab for the absence view.
+  const [statusFilter, setStatusFilter] = useState([])
   const [groupBy, setGroupBy] = useState('date')   // 'date' | 'project'
   const [page, setPage]   = useState(1)
 
@@ -168,11 +172,12 @@ export default function HRTimesheets() {
       effectiveEmpFilter = effectiveEmpFilter ? effectiveEmpFilter.filter(id => officeIdSet.has(id)) : officeEmployeeIds
     }
     if (effectiveEmpFilter) q = q.in('employee_id', effectiveEmpFilter)
+    if (statusFilter.length) q = q.in('status', statusFilter)
     const { data } = await q
     setSheets(data || [])
     setLoading(false)
     setPage(1)
-  }, [from, to, empFilter, officeEmployeeIds])
+  }, [from, to, empFilter, officeEmployeeIds, statusFilter])
 
   useEffect(() => { load() }, [load])
 
@@ -293,6 +298,31 @@ export default function HRTimesheets() {
               </button>
             ))}
           </div>
+        </div>
+        {/* Empty selection = no filter (show all), matching how the
+            MultiSelect filters above behave. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {['pending', 'approved', 'rejected'].map(s => {
+            const on = statusFilter.includes(s)
+            return (
+              <button
+                key={s}
+                onClick={() => { setStatusFilter(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]); setPage(1) }}
+                className={clsx(
+                  'px-2.5 py-1.5 rounded-full text-xs font-medium capitalize border transition-colors',
+                  on ? `${statusBadge[s]} border-transparent`
+                     : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:border-gray-300'
+                )}
+              >
+                {s}
+              </button>
+            )
+          })}
+          {statusFilter.length > 0 && (
+            <button onClick={() => { setStatusFilter([]); setPage(1) }} className="text-xs text-gray-400 hover:text-gray-600 ml-1">
+              Clear
+            </button>
+          )}
         </div>
       </div>
 

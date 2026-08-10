@@ -161,6 +161,19 @@ exports.handler = async (event) => {
       }
     }
 
+    // ── Block actual upload of future-dated rows ────────────────
+    const futureDayViolations = await checkFutureDayViolations(supabaseAdmin, user.id, days)
+    if (futureDayViolations.length > 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: `Timesheets cannot be dated in the future. ${futureDayViolations.length === 1 ? 'One date is' : `${futureDayViolations.length} dates are`} after today (${futureDayViolations[0].today}) in your office's time zone.`,
+          futureDayViolations,
+        }),
+      }
+    }
+
     // ── Block actual upload if a date already has a pending/approved timesheet ──
     // One timesheet per employee per day — resubmission is only possible once a
     // manager rejects the previous one. The DB's partial unique index is the
@@ -425,6 +438,33 @@ async function checkDuplicateDayViolations(db, userId, days) {
     .in('date', dates)
     .in('status', ['pending', 'approved'])
   return (existing || []).map(e => ({ date: e.date }))
+}
+
+// Future-dated rows. Judged against the uploader's OWN OFFICE local date,
+// matching the timesheets_block_future trigger exactly (migration_v17) —
+// the server's own clock is UTC and would wrongly reject a legitimate
+// same-day entry for any office ahead of it. The trigger is the real
+// guarantee; this exists so the employee gets a clear per-date message
+// instead of a raw insert-time error on the first offending row.
+async function checkFutureDayViolations(db, userId, days) {
+  if (days.length === 0) return []
+
+  const { data: profile } = await db
+    .from('profiles')
+    .select('office_id, offices(timezone)')
+    .eq('id', userId)
+    .single()
+
+  // UTC fallback mirrors the trigger's COALESCE(v_zone, 'UTC') — never
+  // ahead of any office, so it can't hand out extra days.
+  const zone = profile?.offices?.timezone || 'UTC'
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const map = Object.fromEntries(parts.map(p => [p.type, p.value]))
+  const today = `${map.year}-${map.month}-${map.day}`
+
+  return days.filter(d => d.date > today).map(d => ({ date: d.date, today }))
 }
 
 // ---------------------------------------------------------------

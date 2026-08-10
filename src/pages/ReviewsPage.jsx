@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { Hourglass, CheckSquare, XCircle, Search, ArrowRight, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
+import { Hourglass, CheckSquare, XCircle, Search, ArrowRight, ChevronUp, ChevronDown, ChevronsUpDown, Inbox, ClipboardCheck } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
 import Pagination from '../components/Pagination'
+import Tabs from '../components/Tabs'
+import TimesheetCompliance from '../components/TimesheetCompliance'
 
 const PAGE_SIZE = 10
 
@@ -40,7 +42,36 @@ function SortHeader({ label, sortKey, sort, onSort, className }) {
   )
 }
 
+const TABS = [
+  { key: 'queue',      label: 'Review queue', icon: Inbox },
+  { key: 'compliance', label: 'Compliance',   icon: ClipboardCheck },
+]
+
 export default function ReviewsPage() {
+  const [active, setActive] = useState('queue')
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="page-title">Timesheet Reviews</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+          {active === 'queue'
+            ? "Review and approve your team's daily timesheets."
+            : "Every day your team owed a timesheet — including days with nothing submitted."}
+        </p>
+      </div>
+
+      <Tabs tabs={TABS} active={active} onChange={setActive} />
+
+      {/* Same component the HR Panel mounts. timesheet_compliance() scopes
+          itself to the caller, so a line manager sees only their own
+          reports here without the page passing any scope of its own. */}
+      {active === 'queue' ? <ReviewQueue /> : <TimesheetCompliance />}
+    </div>
+  )
+}
+
+function ReviewQueue() {
   const { profile } = useAuth()
   const [timesheets, setTimesheets] = useState([])
   const [loading, setLoading] = useState(true)
@@ -116,14 +147,7 @@ export default function ReviewsPage() {
   function handleFilter(f) { setFilter(f); setPage(1) }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="page-title">Timesheet Reviews</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-          Review and approve your team's daily timesheets.
-        </p>
-      </div>
-
+    <div className="space-y-4">
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />

@@ -779,6 +779,19 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
       setDupError(`${format(parseISO(withinDupe), 'MMM d, yyyy')} is entered more than once above — each date can only appear once.`)
       return
     }
+    // Compared against the OFFICE's today, not the browser's — the two
+    // differ for several hours a day. The timesheets_block_future trigger
+    // is the real guarantee (and is what a tampered client would hit);
+    // this just surfaces it before the preview step. Skipped entirely if
+    // the office hasn't loaded yet, rather than falling back to browser
+    // time and rejecting a legitimate same-day entry.
+    if (officeNow) {
+      const future = dates.find(d => d > officeNow.date)
+      if (future) {
+        setDupError(`${format(parseISO(future), 'MMM d, yyyy')} is in the future. Timesheets can only be submitted for today or earlier.`)
+        return
+      }
+    }
     setCheckingDup(true)
     const { data: existing } = await supabase
       .from('timesheets')
@@ -1024,6 +1037,7 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
                 onRemove={() => removeDate(de.id)}
                 getStageWarning={getStageWarning}
                 canRemove={dateEntries.length > 1}
+                maxDate={officeNow?.date}
               />
             ))}
           </div>
@@ -1067,7 +1081,12 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   )
 }
 
-function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove }) {
+function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove, maxDate }) {
+  // maxDate is the OFFICE's today, not the browser's — see officeLocalNow.
+  // This only stops the picker offering future days; the real guarantee is
+  // the timesheets_block_future trigger (migration_v17), which also covers
+  // the XLSX importer.
+  const isFuture = maxDate && de.date > maxDate
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30">
@@ -1076,9 +1095,15 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
           <input
             type="date"
             value={de.date}
+            max={maxDate || undefined}
             onChange={e => onDateChange(e.target.value)}
             className="text-sm font-medium bg-transparent border-none outline-none dark:text-gray-100 cursor-pointer"
           />
+          {isFuture && (
+            <span className="text-xs text-red-600 dark:text-red-400 font-medium">
+              Future date — not allowed
+            </span>
+          )}
         </div>
         {canRemove && (
           <button onClick={onRemove} className="text-gray-400 hover:text-red-500 p-1 rounded-lg transition-colors">

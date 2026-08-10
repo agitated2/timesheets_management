@@ -138,11 +138,23 @@ CREATE INDEX IF NOT EXISTS idx_profiles_manager_ids ON public.profiles USING gin
 -- window to backfill office_id after this INSERT: profiles.office_id
 -- being NULL, even briefly, makes that row visible to every office (see
 -- the `o IS NULL` safety valve in can_see_office).
+-- office_id rides in on signup metadata so create-user.js can create the
+-- profile WITH an office atomically — but metadata is client-supplied, so
+-- an unknown or deactivated office id is discarded rather than written
+-- through verbatim (see migration_v15).
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_office UUID;
 BEGIN
+  v_office := NULLIF(NEW.raw_user_meta_data->>'office_id', '')::UUID;
+
+  IF v_office IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM public.offices WHERE id = v_office AND is_active) THEN
+    v_office := NULL;
+  END IF;
+
   INSERT INTO public.profiles (id, email, office_id)
-  VALUES (NEW.id, NEW.email, NULLIF(NEW.raw_user_meta_data->>'office_id', '')::UUID)
+  VALUES (NEW.id, NEW.email, v_office)
   ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
 END;
@@ -448,8 +460,16 @@ CREATE POLICY "timesheets_read_team_analytics" ON public.timesheets
     AND EXISTS (SELECT 1 FROM public.profiles pr WHERE pr.id = employee_id AND public.can_see_office(pr.office_id))
   );
 
+-- status/reviewer_id/rejection_reason are pinned: `status` only DEFAULTs
+-- to 'pending', so without this a client could insert status='approved'
+-- with a forged reviewer_id and skip manager review entirely (v15).
 CREATE POLICY "timesheets_insert_own" ON public.timesheets
-  FOR INSERT WITH CHECK (auth.uid() = employee_id);
+  FOR INSERT WITH CHECK (
+    auth.uid() = employee_id
+    AND status = 'pending'
+    AND reviewer_id IS NULL
+    AND rejection_reason IS NULL
+  );
 
 CREATE POLICY "timesheets_update_manager" ON public.timesheets
   FOR UPDATE USING (
@@ -514,9 +534,17 @@ CREATE POLICY "entries_read_team_analytics" ON public.timesheet_entries
     )
   );
 
+-- Restricted to PENDING parents: none of the BEFORE INSERT triggers on
+-- this table validate approval state, so without the status check an
+-- employee could keep appending hours to an already-approved sheet (v15).
+-- Rejected sheets are resubmitted as a new row, so this doesn't block
+-- resubmission.
 CREATE POLICY "entries_insert_own" ON public.timesheet_entries
   FOR INSERT WITH CHECK (
-    timesheet_id IN (SELECT id FROM public.timesheets WHERE employee_id = auth.uid())
+    timesheet_id IN (
+      SELECT id FROM public.timesheets
+      WHERE employee_id = auth.uid() AND status = 'pending'
+    )
   );
 
 -- ---- NOTIFICATIONS ----
@@ -1139,6 +1167,130 @@ $$;
 -- and are REVOKEd from anon/authenticated below.
 -- ---------------------------------------------------------------
 
+-- Single source of truth for "did this employee owe a timesheet on this
+-- day" (v16). Shared by timesheet_status_report() below (the reminder
+-- emails) and timesheet_compliance() (the in-app Compliance tab) — two
+-- copies of the working-day/leave/joining-date rules would drift, and the
+-- emails contradicting the UI is worse than either being wrong alone.
+-- Takes an arbitrary employee id, so revoked from PUBLIC and reached only
+-- through the two functions that wrap it.
+CREATE OR REPLACE FUNCTION public.owes_timesheet(p_emp UUID, p_date DATE)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT public.is_working_day(p_emp, p_date)
+    -- Only a full-day approved leave excuses the day — someone on two
+    -- hours' hourly leave still worked the rest and still owes a sheet.
+    AND NOT EXISTS (
+      SELECT 1 FROM public.leave_requests lr
+      WHERE lr.employee_id = p_emp
+        AND lr.status = 'approved' AND lr.revoked_at IS NULL
+        AND lr.unit = 'daily'
+        AND p_date BETWEEN lr.start_date AND lr.end_date
+    );
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.owes_timesheet(UUID, DATE) FROM PUBLIC;
+
+-- One row per employee-day across all four states (approved / rejected /
+-- pending / missing) over an arbitrary date range, SELF-SCOPING by the
+-- caller's role — there is no scope parameter, so a line manager cannot
+-- widen their view by tampering with the request:
+--   HR (hr_view_timesheets) / IT -> everyone in their visible offices
+--   manager / c_suite            -> their direct reports only
+--   anyone else                  -> themselves only
+-- Left callable by `authenticated` on purpose: it derives its whole scope
+-- from auth.uid() and raises for an unauthenticated caller. That is the
+-- opposite of timesheet_status_report(), which takes no caller context
+-- and therefore has to be locked to service_role.
+CREATE OR REPLACE FUNCTION public.timesheet_compliance(p_from DATE, p_to DATE)
+RETURNS TABLE (
+  employee_id  UUID,
+  full_name    TEXT,
+  email        TEXT,
+  office_id    UUID,
+  office_name  TEXT,
+  work_date    DATE,
+  state        TEXT,
+  is_late      BOOLEAN,
+  timesheet_id UUID,
+  total_hours  NUMERIC,
+  submitted_at TIMESTAMPTZ
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_uid     UUID := auth.uid();
+  v_is_hr   BOOLEAN;
+  v_is_mgr  BOOLEAN;
+  v_offices UUID[];
+BEGIN
+  IF v_uid IS NULL THEN RAISE EXCEPTION 'Not authenticated.'; END IF;
+  IF p_from IS NULL OR p_to IS NULL THEN RAISE EXCEPTION 'A date range is required.'; END IF;
+  IF p_to < p_from THEN RAISE EXCEPTION 'End date is before start date.'; END IF;
+  -- 'missing' days are generated, not stored, so an unbounded range would
+  -- produce headcount x days rows.
+  IF p_to - p_from > 92 THEN RAISE EXCEPTION 'Date range cannot exceed 92 days.'; END IF;
+
+  v_is_hr  := public.my_has_role('hr_view_timesheets') OR public.my_has_role('it');
+  v_is_mgr := public.my_has_role('manager') OR public.my_has_role('c_suite');
+  v_offices := public.visible_office_ids_for(v_uid);
+
+  RETURN QUERY
+  WITH scoped_employees AS (
+    SELECT p.id, p.full_name, p.email, p.office_id, p.joining_date,
+           o.name AS office_name, o.timezone, o.timesheet_deadline
+    FROM public.profiles p
+    JOIN public.offices o ON o.id = p.office_id
+    WHERE p.onboarding_complete
+      AND p.joining_date IS NOT NULL
+      AND o.is_active
+      AND (
+        (v_is_hr AND p.office_id = ANY(v_offices))
+        -- Office-bounded too, so it can never exceed what
+        -- profiles_read_subordinates already allows.
+        OR (v_is_mgr AND v_uid = ANY(p.manager_ids) AND p.office_id = ANY(v_offices))
+        OR p.id = v_uid
+      )
+  ),
+  candidate_days AS (
+    -- Never generate days before someone joined, so a new starter isn't
+    -- reported 'missing' for a period they didn't work here.
+    SELECT se.*, gs.d::date AS d
+    FROM scoped_employees se
+    CROSS JOIN LATERAL generate_series(
+      GREATEST(p_from, se.joining_date), p_to, INTERVAL '1 day'
+    ) AS gs(d)
+  ),
+  owed AS (
+    SELECT cd.* FROM candidate_days cd
+    WHERE public.owes_timesheet(cd.id, cd.d)
+  ),
+  live AS (
+    -- A rejected sheet is superseded by a later resubmission for the same
+    -- date, so prefer a pending/approved row and fall back to the most
+    -- recent rejection.
+    SELECT ow.*, cur.id AS ts_id, cur.status::text AS ts_status,
+           cur.total_hours AS ts_hours, cur.created_at AS ts_created
+    FROM owed ow
+    LEFT JOIN LATERAL (
+      SELECT ts.* FROM public.timesheets ts
+      WHERE ts.employee_id = ow.id AND ts.date = ow.d
+      ORDER BY (ts.status IN ('pending','approved')) DESC, ts.created_at DESC
+      LIMIT 1
+    ) cur ON true
+  )
+  SELECT
+    l.id, l.full_name, l.email, l.office_id, l.office_name, l.d,
+    COALESCE(l.ts_status, 'missing'),
+    -- 'late' is a badge, not a state: a late sheet is still approved.
+    -- NULL rather than false when there is no sheet at all, so the UI can
+    -- tell "on time" apart from "not applicable".
+    CASE WHEN l.ts_created IS NULL THEN NULL
+         ELSE (l.ts_created AT TIME ZONE l.timezone) > (l.d + l.timesheet_deadline)
+    END,
+    l.ts_id, l.ts_hours, l.ts_created
+  FROM live l
+  ORDER BY l.d DESC, l.full_name;
+END;
+$$;
+
 -- One row per PROBLEM day (state 'missing' or 'late') across every active
 -- office, each judged against that office's own local business date and
 -- deadline. 'missing' rows span the whole backlog window so a persistent
@@ -1182,16 +1334,10 @@ RETURNS TABLE (
           AND t.status IN ('pending', 'approved')
         LIMIT 1) AS live_created_at
     FROM candidate_days cd
-    WHERE public.is_working_day(cd.employee_id, cd.d)
-      -- Only a full-day approved leave excuses the day — someone on two
-      -- hours' hourly leave still worked the rest and still owes a sheet.
-      AND NOT EXISTS (
-        SELECT 1 FROM public.leave_requests lr
-        WHERE lr.employee_id = cd.employee_id
-          AND lr.status = 'approved' AND lr.revoked_at IS NULL
-          AND lr.unit = 'daily'
-          AND cd.d BETWEEN lr.start_date AND lr.end_date
-      )
+    -- Shared with timesheet_compliance() via owes_timesheet() (v16) —
+    -- the reminder emails and the in-app Compliance tab must never
+    -- disagree about who is missing.
+    WHERE public.owes_timesheet(cd.employee_id, cd.d)
   )
   SELECT employee_id, full_name, email, office_id, office_name, manager_ids, d, 'missing'
   FROM problem_days
@@ -1301,6 +1447,53 @@ CREATE TRIGGER timesheets_block_on_leave
   BEFORE INSERT ON public.timesheets
   FOR EACH ROW EXECUTE FUNCTION public.block_timesheet_on_leave();
 
+-- Backdating is fine (that's what the backlog and reminder job are for);
+-- logging work that hasn't happened yet is not. "Future" is judged
+-- against the EMPLOYEE'S OWN OFFICE local date — CURRENT_DATE (UTC) and
+-- the browser clock both disagree with it for several hours a day, so a
+-- UTC check would wrongly reject an ordinary 02:00 same-day entry in
+-- Dubai, and a browser check is defeated by changing the system clock.
+--
+-- A trigger, not a CHECK (can't call now() or join another table) and not
+-- an RLS WITH CHECK (wouldn't cover the XLSX importer, which writes via
+-- the service role and bypasses RLS). Triggers fire for service_role too,
+-- so one rule covers both write paths. See migration_v17.
+CREATE OR REPLACE FUNCTION public.block_future_timesheet()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_today DATE; v_zone TEXT;
+BEGIN
+  -- Only when the date is actually set or moved — a manager approving an
+  -- old sheet leaves `date` alone and must not be blocked.
+  IF TG_OP = 'UPDATE' AND NEW.date IS NOT DISTINCT FROM OLD.date THEN
+    RETURN NEW;
+  END IF;
+
+  -- LEFT JOIN: office_id is nullable, and someone with no office should
+  -- still be held to *a* rule rather than skipping the check. UTC is the
+  -- strictest sane fallback — never ahead of any office, so it can never
+  -- hand out extra days.
+  SELECT o.timezone INTO v_zone
+    FROM public.profiles p
+    LEFT JOIN public.offices o ON o.id = p.office_id
+   WHERE p.id = NEW.employee_id;
+
+  v_today := (now() AT TIME ZONE COALESCE(v_zone, 'UTC'))::date;
+
+  IF NEW.date > v_today THEN
+    RAISE EXCEPTION
+      'Timesheets cannot be dated in the future — % is after today (%) in your office''s time zone.',
+      to_char(NEW.date, 'DD Mon YYYY'), to_char(v_today, 'DD Mon YYYY');
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS timesheets_block_future ON public.timesheets;
+CREATE TRIGGER timesheets_block_future
+  BEFORE INSERT OR UPDATE ON public.timesheets
+  FOR EACH ROW EXECUTE FUNCTION public.block_future_timesheet();
+
 -- Hourly leaves block only overlapping entry time windows on that date.
 CREATE OR REPLACE FUNCTION public.block_entry_on_hourly_leave()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -1339,6 +1532,13 @@ RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   SELECT id, 'leave', p_message FROM public.profiles
   WHERE 'hr_approve_requests' = ANY(roles) OR 'it' = ANY(roles);
 $$;
+
+-- Internal-only: SECURITY DEFINER with no authorization check of its own,
+-- so with the default PUBLIC grant any authenticated user could push
+-- arbitrary text as a notification to every HR approver and IT user
+-- (v15). Its callers are themselves SECURITY DEFINER, so they execute
+-- this as the owner and are unaffected.
+REVOKE EXECUTE ON FUNCTION public.notify_hr_approvers(TEXT) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION public.submit_leave_request(
   p_category UUID, p_unit leave_unit, p_start DATE, p_end DATE,
@@ -2098,6 +2298,57 @@ $$;
 DROP TRIGGER IF EXISTS profiles_guard_discipline ON public.profiles;
 CREATE TRIGGER profiles_guard_discipline BEFORE UPDATE ON public.profiles
   FOR EACH ROW EXECUTE FUNCTION public.guard_discipline_change();
+
+-- Privileged-column lock (see migration_v15). RLS is row-level, not
+-- column-level: profiles_update_own grants UPDATE on your own row and
+-- says nothing about WHICH columns, so without this trigger any user
+-- could set their own roles to '{it}' and take over the whole app.
+--
+-- Both exemptions are load-bearing:
+--   * auth.uid() IS NULL — the service-role path. Triggers still fire for
+--     service_role (only RLS is bypassed) and a service_role JWT has no
+--     `sub`, so auth.uid() is NULL; without this, create-user.js and
+--     update-user.js break. Not an anon hole: anon satisfies neither
+--     profiles_update_own nor profiles_update_it, so RLS rejects the row
+--     before this trigger runs.
+--   * my_has_role('it') — preserves IT's in-app role management.
+CREATE OR REPLACE FUNCTION public.guard_profile_privileged_columns()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF auth.uid() IS NULL OR public.my_has_role('it') THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.roles                 IS DISTINCT FROM OLD.roles
+  OR NEW.role                  IS DISTINCT FROM OLD.role
+  OR NEW.sees_all_offices      IS DISTINCT FROM OLD.sees_all_offices
+  OR NEW.office_id             IS DISTINCT FROM OLD.office_id
+  OR NEW.additional_office_ids IS DISTINCT FROM OLD.additional_office_ids
+  OR NEW.joining_date          IS DISTINCT FROM OLD.joining_date
+  OR NEW.email                 IS DISTINCT FROM OLD.email THEN
+    RAISE EXCEPTION 'Roles, offices, joining date and email can only be changed by IT.';
+  END IF;
+
+  -- Set once during onboarding, immutable afterwards — otherwise anyone
+  -- could reassign themselves under a friendlier approver at will.
+  IF (NEW.manager_ids IS DISTINCT FROM OLD.manager_ids
+      OR NEW.manager_id IS DISTINCT FROM OLD.manager_id)
+     AND OLD.onboarding_complete THEN
+    RAISE EXCEPTION 'Your line manager can only be changed by IT.';
+  END IF;
+
+  -- Closes the loop on the rule above.
+  IF OLD.onboarding_complete AND NOT NEW.onboarding_complete THEN
+    RAISE EXCEPTION 'Onboarding cannot be reset.';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS profiles_guard_privileged ON public.profiles;
+CREATE TRIGGER profiles_guard_privileged BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.guard_profile_privileged_columns();
 
 CREATE OR REPLACE FUNCTION public.require_entry_discipline()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$

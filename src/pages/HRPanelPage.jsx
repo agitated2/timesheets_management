@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { FileText, Inbox, Users, Tags, CalendarDays, ShieldAlert, Layers } from 'lucide-react'
+import { FileText, Inbox, Users, Tags, CalendarDays, ShieldAlert, Layers, ClipboardCheck } from 'lucide-react'
 import Tabs from '../components/Tabs'
+import TimesheetCompliance from '../components/TimesheetCompliance'
 import HRTimesheets from '../components/hr/HRTimesheets'
 import HRApprovals from '../components/hr/HRApprovals'
 import HREmployeeLeaves from '../components/hr/HREmployeeLeaves'
@@ -17,6 +18,10 @@ export default function HRPanelPage() {
   const tabs = useMemo(() => {
     const t = []
     if (it || hasRole('hr_view_timesheets')) t.push({ key: 'timesheets', label: 'Timesheets', icon: FileText, Comp: HRTimesheets })
+    // Same component the Reviews page mounts for line managers —
+    // timesheet_compliance() scopes itself to the caller, so HR gets
+    // their visible offices here and an LM gets their team there.
+    if (it || hasRole('hr_view_timesheets')) t.push({ key: 'compliance', label: 'Compliance', icon: ClipboardCheck, Comp: TimesheetCompliance })
     if (it || hasRole('hr_approve_requests')) t.push({ key: 'approvals', label: 'Approvals', icon: Inbox, Comp: HRApprovals })
     if (it || hasRole('hr_view_timesheets') || hasRole('hr_approve_requests') || hasRole('hr_manage_policies'))
       t.push({ key: 'leaves', label: 'Employee Leaves', icon: Users, Comp: HREmployeeLeaves })
