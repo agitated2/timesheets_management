@@ -1,8 +1,8 @@
 // Pure, dependency-free project-constraint rules.
 // This is the single source of truth for the FRONTEND and pre-checks; the
 // database triggers/RPCs in schema.sql mirror this logic and are the hard
-// guarantee, and netlify/functions/parse-timesheet.js mirrors it for Excel.
-// Keep all three in sync.
+// guarantee, and supabase/functions/parse-timesheet/index.ts mirrors it for
+// Excel. Keep all three in sync.
 //
 // Enforcement model (hard blocks, no grace period). Every stage is date-tracked:
 //   An entry dated D is loggable iff start_date ≤ D ≤ end_date.

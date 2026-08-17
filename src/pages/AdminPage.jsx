@@ -5,13 +5,14 @@ import {
   Shield, Search, CheckCircle, XCircle, UserPlus, Trash2, X,
   Eye, EyeOff, AlertTriangle, Pencil, FileText, ChevronDown,
   ChevronUp, Calendar, Check, ChevronLeft, ChevronRight, RefreshCw,
-  Clock, Send,
+  Clock, Send, ShieldCheck, Upload,
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
 import { SkeletonList } from '../components/Skeleton'
 import MultiSelect from '../components/MultiSelect'
+import BulkImportUsersModal from '../components/admin/BulkImportUsersModal'
 
 const PAGE_SIZE = 10
 
@@ -102,9 +103,25 @@ const statusBadge = {
   rejected: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 }
 
-async function getSession() {
-  const { data: { session } } = await supabase.auth.getSession()
-  return session
+// Thin wrapper around supabase.functions.invoke() for the IT-gated Edge
+// Functions (create-user, update-user, delete-user, delete-timesheets).
+// invoke() attaches the caller's own session Authorization header
+// automatically — no manual getSession()/fetch() dance needed.
+//
+// On a non-2xx response, supabase-js returns data: null and puts the raw
+// Response on error.context — the function's own { error } body (the
+// actually useful message) lives there, not on `error` itself. Throws so
+// every call site can just try/catch like it's a normal async call.
+async function invokeFn(name, body) {
+  const { data, error } = await supabase.functions.invoke(name, { body })
+  if (error) {
+    let message = error.message
+    if (error.context?.json) {
+      try { message = (await error.context.json())?.error || message } catch { /* body wasn't JSON */ }
+    }
+    throw new Error(message)
+  }
+  return data
 }
 
 // ── Create User Modal ─────────────────────────────────────────────
@@ -131,23 +148,12 @@ function CreateUserModal({ offices, onClose, onCreated }) {
     if (!officeId) { setError('Select an office.'); return }
     setLoading(true)
     try {
-      const session = await getSession()
-      const res = await fetch('/.netlify/functions/create-user', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles, officeId }),
-      })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setError(json.error || `Server error ${res.status}. Creating users needs the Netlify functions — run "netlify dev" locally or use the deployed site.`)
-        setLoading(false)
-        return
-      }
+      await invokeFn('create-user', { email: email.trim().toLowerCase(), password, fullName: fullName.trim(), roles, officeId })
       setLoading(false)
       onCreated()
       onClose()
     } catch (err) {
-      setError(`Could not reach the server: ${err.message}. Creating users needs the Netlify functions — run "netlify dev" locally instead of "npm run dev".`)
+      setError(err.message)
       setLoading(false)
     }
   }
@@ -229,6 +235,8 @@ function EditUserModal({ user: target, onClose, onSaved }) {
   const [managers, setManagers]     = useState([])
   const [loading, setLoading]       = useState(false)
   const [error, setError]           = useState('')
+  const [mfaEnrolled, setMfaEnrolled] = useState(undefined) // undefined = loading
+  const [removingMfa, setRemovingMfa] = useState(false)
 
   function toggleEditRole(r) {
     setRoles(prev => prev.includes(r) ? prev.filter(x => x !== r) : [...prev, r])
@@ -250,7 +258,36 @@ function EditUserModal({ user: target, onClose, onSaved }) {
       .select('id, name, is_active')
       .order('name')
       .then(({ data }) => { if (data) setDisciplines(data) })
+    loadMfaStatus()
   }, [])
+
+  async function loadMfaStatus() {
+    try {
+      const data = await invokeFn('update-user', { userId: target.id, checkMfaStatus: true })
+      setMfaEnrolled(!!data.mfaEnrolled)
+    } catch {
+      setMfaEnrolled(null)
+    }
+  }
+
+  // Auth hardening D2: only IT can remove another user's MFA — there is
+  // no self-removal (see MfaSection in SettingsPage.jsx). Resets their
+  // grace period too (server-side, see update-user.js) so a user who
+  // lost a device gets a fresh window to re-enrol rather than landing
+  // straight on "mandatory, right now".
+  async function removeMfa() {
+    if (!window.confirm(`Remove two-factor authentication for ${target.full_name || target.email}? They will get a new 7-day grace period to set it up again.`)) return
+    setRemovingMfa(true)
+    setError('')
+    try {
+      await invokeFn('update-user', { userId: target.id, removeMfa: true })
+      setMfaEnrolled(false)
+    } catch (err) {
+      setError(`Failed to remove MFA: ${err.message}`)
+    } finally {
+      setRemovingMfa(false)
+    }
+  }
 
   async function handleSave(e) {
     e.preventDefault()
@@ -281,19 +318,12 @@ function EditUserModal({ user: target, onClose, onSaved }) {
     // Email / password change the auth user — these need the admin function.
     if (emailChanged || newPassword) {
       try {
-        const session = await getSession()
         const body = { userId: target.id }
         if (emailChanged) body.email = email.trim().toLowerCase()
         if (newPassword)  body.newPassword = newPassword
-        const res = await fetch('/.netlify/functions/update-user', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-          body: JSON.stringify(body),
-        })
-        const json = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(json.error || `Server error ${res.status}`)
+        await invokeFn('update-user', body)
       } catch (err) {
-        setError(`Saved profile changes, but email/password update failed: ${err.message}. (Email & password changes require the Netlify functions — run "netlify dev" locally or use the deployed site.)`)
+        setError(`Saved profile changes, but email/password update failed: ${err.message}`)
         setLoading(false)
         return
       }
@@ -372,6 +402,28 @@ function EditUserModal({ user: target, onClose, onSaved }) {
           <PasswordInput value={newPassword} onChange={setNewPw} show={showPw} onToggle={() => setShowPw(v => !v)} placeholder="New password (optional)" />
         </Field>
 
+        <Field label="Two-factor authentication">
+          {mfaEnrolled === undefined ? (
+            <div className="h-9 w-full bg-gray-100 dark:bg-gray-800 rounded-lg animate-pulse" />
+          ) : mfaEnrolled ? (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2">
+              <span className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400 font-medium">
+                <ShieldCheck size={14} /> Enabled
+              </span>
+              <button
+                type="button"
+                onClick={removeMfa}
+                disabled={removingMfa}
+                className="text-xs font-medium text-red-600 hover:text-red-700 dark:text-red-400 disabled:opacity-50"
+              >
+                {removingMfa ? 'Removing…' : 'Remove'}
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400 px-1">Not set up{mfaEnrolled === null ? ' (status unavailable)' : ''}.</p>
+          )}
+        </Field>
+
         <ErrorBox msg={error} />
 
         <div className="flex gap-3 pt-1">
@@ -424,17 +476,15 @@ function UserTimesheetsModal({ user: target, onClose, onDeleted }) {
   async function handleDelete() {
     setDeleting(true)
     setError('')
-    const session = await getSession()
-    const res = await fetch('/.netlify/functions/delete-timesheets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ timesheetIds: [...selected], userId: target.id, notify }),
-    })
-    const json = await res.json()
-    setDeleting(false)
-    if (!res.ok) { setError(json.error); return }
-    onDeleted(json.deleted)
-    onClose()
+    try {
+      const data = await invokeFn('delete-timesheets', { timesheetIds: [...selected], userId: target.id, notify })
+      setDeleting(false)
+      onDeleted(data.deleted)
+      onClose()
+    } catch (err) {
+      setDeleting(false)
+      setError(err.message)
+    }
   }
 
   const allChecked = timesheets.length > 0 && selected.size === timesheets.length
@@ -1073,6 +1123,7 @@ export default function AdminPage() {
   const [activeTab, setActiveTab]         = useState('users')
   const [toast, setToast]                 = useState('')
   const [showCreateModal, setShowCreate]  = useState(false)
+  const [showBulkImport, setShowBulkImport] = useState(false)
   const [editTarget, setEditTarget]       = useState(null)   // user object to edit
   const [tsTarget, setTsTarget]           = useState(null)   // user to manage timesheets for
   const [confirmDelete, setConfirmDelete] = useState(null)
@@ -1134,18 +1185,17 @@ export default function AdminPage() {
 
   async function deleteUser(userId) {
     setDeleting(true)
-    const session = await getSession()
-    const res = await fetch('/.netlify/functions/delete-user', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ userId }),
-    })
-    const json = await res.json()
-    setDeleting(false)
-    setConfirmDelete(null)
-    if (!res.ok) { showToast('Error: ' + json.error); return }
-    setUsers(prev => prev.filter(u => u.id !== userId))
-    showToast('User deleted permanently.')
+    try {
+      await invokeFn('delete-user', { userId })
+      setDeleting(false)
+      setConfirmDelete(null)
+      setUsers(prev => prev.filter(u => u.id !== userId))
+      showToast('User deleted permanently.')
+    } catch (err) {
+      setDeleting(false)
+      setConfirmDelete(null)
+      showToast('Error: ' + err.message)
+    }
   }
 
   async function forceDecision(tsId, status, reason = null) {
@@ -1188,6 +1238,13 @@ export default function AdminPage() {
           offices={offices}
           onClose={() => setShowCreate(false)}
           onCreated={() => { loadUsers(); showToast('User account created.') }}
+        />
+      )}
+
+      {showBulkImport && (
+        <BulkImportUsersModal
+          onClose={() => setShowBulkImport(false)}
+          onImported={loadUsers}
         />
       )}
 
@@ -1238,6 +1295,9 @@ export default function AdminPage() {
                 placeholder="Search users…"
               />
             </div>
+            <button onClick={() => setShowBulkImport(true)} className="btn-secondary flex-shrink-0">
+              <Upload size={15} /> Bulk import
+            </button>
             <button onClick={() => setShowCreate(true)} className="btn-primary flex-shrink-0">
               <UserPlus size={15} /> Create user
             </button>

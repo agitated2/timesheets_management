@@ -6,14 +6,20 @@ import clsx from 'clsx'
  * height so content taller than the screen scrolls inside the body instead
  * of pushing buttons off-screen, with the header pinned.
  */
-export default function Modal({ title, icon, onClose, children, wide = false }) {
+export default function Modal({ title, icon, onClose, children, wide = false, size }) {
+  // `size` supersedes `wide` when given; `wide` is kept so existing call
+  // sites keep working unchanged.
+  const maxWidth = size
+    ? { md: 'max-w-md', lg: 'max-w-lg', xl: 'max-w-2xl' }[size] ?? 'max-w-md'
+    : (wide ? 'max-w-lg' : 'max-w-md')
+
   return (
     <div
       className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
       onClick={onClose}
     >
       <div
-        className={clsx('bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-800 w-full flex flex-col max-h-[90vh]', wide ? 'max-w-lg' : 'max-w-md')}
+        className={clsx('bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-800 w-full flex flex-col max-h-[90vh]', maxWidth)}
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">

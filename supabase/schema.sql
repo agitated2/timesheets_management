@@ -1521,6 +1521,67 @@ CREATE TRIGGER entries_block_on_hourly_leave
   BEFORE INSERT ON public.timesheet_entries
   FOR EACH ROW EXECUTE FUNCTION public.block_entry_on_hourly_leave();
 
+-- No overlapping entries within one employee-day, and no wrapped
+-- (overnight) ranges — an overnight shift is two entries, one per day
+-- (v20). calcHours() in UploadPage.jsx and parseTimeRange() in
+-- parse-timesheet both reject wrapping to match; this trigger is the
+-- guarantee.
+--
+-- A DEFERRABLE CONSTRAINT trigger, not BEFORE INSERT FOR EACH ROW: both
+-- write paths insert a whole day's entries in one statement, and a BEFORE
+-- row trigger's SELECT can't dependably see rows from its own command —
+-- it would pass a batch that overlaps itself. Deferring to COMMIT means
+-- every row in the batch is visible.
+CREATE OR REPLACE FUNCTION public.block_overlapping_entries()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_date DATE;
+  v_other RECORD;
+BEGIN
+  -- Entries with no clock times are legitimate (parse-timesheet's
+  -- section/legacy formats produce them) — nothing to compare.
+  IF NEW.time_from IS NULL OR NEW.time_to IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  IF NEW.time_to <= NEW.time_from THEN
+    RAISE EXCEPTION
+      'A timesheet entry must end after it starts (got % to %). An overnight shift should be entered as two entries, one on each day.',
+      to_char(NEW.time_from, 'HH24:MI'), to_char(NEW.time_to, 'HH24:MI');
+  END IF;
+
+  -- Scoped by timesheet_id: idx_timesheets_one_per_day already makes one
+  -- timesheet == one employee-day for pending/approved sheets.
+  -- Half-open overlap — adjacency (a.to = b.from) is NOT an overlap.
+  SELECT e.time_from, e.time_to INTO v_other
+  FROM public.timesheet_entries e
+  WHERE e.timesheet_id = NEW.timesheet_id
+    AND e.id <> NEW.id
+    AND e.time_from IS NOT NULL
+    AND e.time_to IS NOT NULL
+    AND e.time_from < NEW.time_to
+    AND e.time_to   > NEW.time_from
+  LIMIT 1;
+
+  IF FOUND THEN
+    SELECT t.date INTO v_date FROM public.timesheets t WHERE t.id = NEW.timesheet_id;
+    RAISE EXCEPTION
+      'Timesheet entries cannot overlap: % to % clashes with an existing entry (% to %) on %.',
+      to_char(NEW.time_from, 'HH24:MI'), to_char(NEW.time_to, 'HH24:MI'),
+      to_char(v_other.time_from, 'HH24:MI'), to_char(v_other.time_to, 'HH24:MI'),
+      to_char(v_date, 'DD Mon YYYY');
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS entries_no_time_overlap ON public.timesheet_entries;
+CREATE CONSTRAINT TRIGGER entries_no_time_overlap
+  AFTER INSERT OR UPDATE ON public.timesheet_entries
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION public.block_overlapping_entries();
+
 -- ---------------------------------------------------------------
 -- REQUEST WORKFLOW RPCs (state machine + permissions centralised)
 -- ---------------------------------------------------------------
@@ -2312,6 +2373,22 @@ CREATE TRIGGER profiles_guard_discipline BEFORE UPDATE ON public.profiles
 --     profiles_update_own nor profiles_update_it, so RLS rejects the row
 --     before this trigger runs.
 --   * my_has_role('it') — preserves IT's in-app role management.
+--
+-- mfa_grace_started_at (v18): set once by MfaGate the first time a user
+-- with no verified TOTP factor hits the post-login gate. From then on
+-- only IT may change it (e.g. resetting it to NULL after removing a
+-- lost-device factor) — a grace period a user can renew themselves isn't
+-- a grace period.
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS mfa_grace_started_at TIMESTAMPTZ;
+
+-- must_change_password (v19): bulk-imported accounts get a system-
+-- generated temp password and this flag set. NOT in the privileged-column
+-- list below — a user clearing their own flag after actually changing
+-- their password isn't privilege-sensitive, unlike roles/office_id.
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false;
+
 CREATE OR REPLACE FUNCTION public.guard_profile_privileged_columns()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
@@ -2340,6 +2417,11 @@ BEGIN
   -- Closes the loop on the rule above.
   IF OLD.onboarding_complete AND NOT NEW.onboarding_complete THEN
     RAISE EXCEPTION 'Onboarding cannot be reset.';
+  END IF;
+
+  IF NEW.mfa_grace_started_at IS DISTINCT FROM OLD.mfa_grace_started_at
+     AND OLD.mfa_grace_started_at IS NOT NULL THEN
+    RAISE EXCEPTION 'The MFA grace period cannot be modified once started.';
   END IF;
 
   RETURN NEW;
@@ -2715,3 +2797,341 @@ BEGIN
      );
 END;
 $$;
+
+
+-- ===============================================================
+-- CUSTOM PROJECT FIELDS (see migration_v21)
+--
+-- Admin-defined dropdown fields attached to projects and/or individual
+-- phases; values roll up as filters/groupings in Project Analytics.
+--
+-- Four load-bearing decisions, spelled out in migration_v21's header:
+--   * definitions are workspace-level (per-project names would fragment
+--     analytics into "Building"/"building"/"Bldg No.");
+--   * values keep BOTH option_id and a label snapshot (FK for joins,
+--     snapshot so renaming an option can't rewrite history);
+--   * assignment is project-level with per-phase override, and
+--     'disabled' is a real stored value so one phase can opt out;
+--   * N/A is a real undeletable sentinel option, NOT the absence of a
+--     value — "said N/A", "left blank" and "field didn't exist yet" are
+--     three different facts.
+-- ===============================================================
+
+
+-- ── (a) The Library ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.custom_fields (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        TEXT NOT NULL,
+  description TEXT,
+  is_active   BOOLEAN NOT NULL DEFAULT true,
+  created_by  UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Case-insensitive uniqueness: "Building" and "building" being separate
+-- fields is precisely the fragmentation this design exists to prevent.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_fields_name_lower
+  ON public.custom_fields (lower(name));
+
+DROP TRIGGER IF EXISTS custom_fields_updated_at ON public.custom_fields;
+CREATE TRIGGER custom_fields_updated_at BEFORE UPDATE ON public.custom_fields
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ── (b) Options ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.custom_field_options (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  field_id       UUID NOT NULL REFERENCES public.custom_fields(id) ON DELETE CASCADE,
+  label          TEXT NOT NULL,
+  sort_order     INT NOT NULL DEFAULT 0,
+  is_archived    BOOLEAN NOT NULL DEFAULT false,
+  -- The auto-created "N/A" row. Exactly one per field, never deletable,
+  -- always sorts first, and is the default selection on the entry form.
+  is_na_sentinel BOOLEAN NOT NULL DEFAULT false,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_options_field_label_lower
+  ON public.custom_field_options (field_id, lower(label));
+CREATE INDEX IF NOT EXISTS idx_cf_options_field ON public.custom_field_options (field_id);
+-- At most one sentinel per field.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_options_one_sentinel
+  ON public.custom_field_options (field_id) WHERE is_na_sentinel;
+
+-- Every field gets its N/A option automatically, so no code path can
+-- create a field that lacks one.
+CREATE OR REPLACE FUNCTION public.create_na_option()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  INSERT INTO public.custom_field_options (field_id, label, sort_order, is_na_sentinel)
+  VALUES (NEW.id, 'N/A', -1, true);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS custom_fields_add_na ON public.custom_fields;
+CREATE TRIGGER custom_fields_add_na AFTER INSERT ON public.custom_fields
+  FOR EACH ROW EXECUTE FUNCTION public.create_na_option();
+
+-- The sentinel must survive: deleting it would leave entries pointing at
+-- nothing and remove the only way to say "not applicable".
+CREATE OR REPLACE FUNCTION public.protect_na_option()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.is_na_sentinel THEN
+      RAISE EXCEPTION 'The N/A option is built in and cannot be deleted.';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  -- Renaming, archiving, or un-flagging the sentinel are all ways of
+  -- losing it by another name.
+  IF OLD.is_na_sentinel AND (
+       NEW.is_na_sentinel IS DISTINCT FROM OLD.is_na_sentinel
+    OR NEW.label          IS DISTINCT FROM OLD.label
+    OR NEW.is_archived
+  ) THEN
+    RAISE EXCEPTION 'The N/A option is built in and cannot be renamed, archived, or reassigned.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS cf_options_protect_na ON public.custom_field_options;
+CREATE TRIGGER cf_options_protect_na BEFORE UPDATE OR DELETE ON public.custom_field_options
+  FOR EACH ROW EXECUTE FUNCTION public.protect_na_option();
+
+-- ── (c) Assignments ─────────────────────────────────────────────────
+DO $$ BEGIN
+  CREATE TYPE custom_field_requirement AS ENUM ('required', 'optional', 'disabled');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+CREATE TABLE IF NOT EXISTS public.custom_field_assignments (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  field_id    UUID NOT NULL REFERENCES public.custom_fields(id)   ON DELETE CASCADE,
+  project_id  UUID NOT NULL REFERENCES public.projects(id)        ON DELETE CASCADE,
+  -- NULL = applies to every phase of the project. A row with stage_id
+  -- set overrides the project-level row for that phase.
+  stage_id    UUID REFERENCES public.project_stages(id)           ON DELETE CASCADE,
+  requirement custom_field_requirement NOT NULL DEFAULT 'optional',
+  created_by  UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Two partial indexes rather than one over (field, project, stage):
+-- NULLs don't compare equal in a UNIQUE index, so a plain index would
+-- happily allow several project-level rows for the same field.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_assign_project_level
+  ON public.custom_field_assignments (field_id, project_id) WHERE stage_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_assign_stage_level
+  ON public.custom_field_assignments (field_id, project_id, stage_id) WHERE stage_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cf_assign_project ON public.custom_field_assignments (project_id);
+CREATE INDEX IF NOT EXISTS idx_cf_assign_stage   ON public.custom_field_assignments (stage_id);
+
+-- ── (d) Values ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.timesheet_entry_field_values (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  entry_id             UUID NOT NULL REFERENCES public.timesheet_entries(id)  ON DELETE CASCADE,
+  field_id             UUID NOT NULL REFERENCES public.custom_fields(id)      ON DELETE CASCADE,
+  -- RESTRICT, not CASCADE or SET NULL: an option must never be hard
+  -- deleted while values reference it. Archiving is the supported path
+  -- (see protect/archive semantics above), and this makes that a rule
+  -- rather than a convention.
+  option_id            UUID NOT NULL REFERENCES public.custom_field_options(id) ON DELETE RESTRICT,
+  -- What the option said at write time. Renaming an option must not
+  -- rewrite history; this is the audit answer, option_id is the join key.
+  option_label_snapshot TEXT NOT NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One value per (entry, field) in v1. Dropping this constraint is all
+-- that multi-select would require.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entry_field_values_unique
+  ON public.timesheet_entry_field_values (entry_id, field_id);
+CREATE INDEX IF NOT EXISTS idx_entry_field_values_entry  ON public.timesheet_entry_field_values (entry_id);
+-- Backs the analytics filter/group-by path: "hours where field X = option Y".
+CREATE INDEX IF NOT EXISTS idx_entry_field_values_field_option
+  ON public.timesheet_entry_field_values (field_id, option_id);
+
+-- Snapshot is filled server-side from the option, so a client cannot
+-- write a label that disagrees with the option it points at.
+CREATE OR REPLACE FUNCTION public.set_field_value_snapshot()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_label TEXT; v_field UUID;
+BEGIN
+  SELECT label, field_id INTO v_label, v_field
+  FROM public.custom_field_options WHERE id = NEW.option_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Unknown custom field option.';
+  END IF;
+  -- The option must belong to the field being recorded, or the value is
+  -- incoherent (e.g. a "Building" field holding a "Zone" option).
+  IF v_field <> NEW.field_id THEN
+    RAISE EXCEPTION 'That option does not belong to the selected field.';
+  END IF;
+
+  NEW.option_label_snapshot := v_label;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS entry_field_values_snapshot ON public.timesheet_entry_field_values;
+CREATE TRIGGER entry_field_values_snapshot
+  BEFORE INSERT OR UPDATE ON public.timesheet_entry_field_values
+  FOR EACH ROW EXECUTE FUNCTION public.set_field_value_snapshot();
+
+-- ── (e) Resolution helper ───────────────────────────────────────────
+-- Which fields apply to a given stage, and how. Most specific wins:
+-- a stage-level row beats the project-level row for that field.
+-- 'disabled' rows are returned so the caller can tell "explicitly off"
+-- from "never assigned" — the entry form filters them out, the
+-- assignment UI needs to show them.
+CREATE OR REPLACE FUNCTION public.fields_for_stage(p_stage UUID)
+RETURNS TABLE (
+  field_id    UUID,
+  field_name  TEXT,
+  requirement custom_field_requirement
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT DISTINCT ON (a.field_id)
+         a.field_id, f.name, a.requirement
+  FROM public.custom_field_assignments a
+  JOIN public.custom_fields f ON f.id = a.field_id
+  JOIN public.project_stages s ON s.id = p_stage
+  WHERE a.project_id = s.project_id
+    AND (a.stage_id = p_stage OR a.stage_id IS NULL)
+    AND f.is_active
+  -- stage-specific row (stage_id NOT NULL) sorts first, so DISTINCT ON
+  -- keeps it over the project-level fallback.
+  ORDER BY a.field_id, (a.stage_id IS NULL);
+$$;
+
+-- ── (f) RLS ─────────────────────────────────────────────────────────
+ALTER TABLE public.custom_fields                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.custom_field_options          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.custom_field_assignments      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.timesheet_entry_field_values  ENABLE ROW LEVEL SECURITY;
+
+-- Definitions: readable by everyone signed in (the entry form has to
+-- render them), writable only by whoever already manages projects.
+DROP POLICY IF EXISTS "cf_read"   ON public.custom_fields;
+DROP POLICY IF EXISTS "cf_manage" ON public.custom_fields;
+CREATE POLICY "cf_read"   ON public.custom_fields FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "cf_manage" ON public.custom_fields FOR ALL
+  USING (public.can_manage_projects()) WITH CHECK (public.can_manage_projects());
+
+DROP POLICY IF EXISTS "cf_opt_read"   ON public.custom_field_options;
+DROP POLICY IF EXISTS "cf_opt_manage" ON public.custom_field_options;
+CREATE POLICY "cf_opt_read"   ON public.custom_field_options FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "cf_opt_manage" ON public.custom_field_options FOR ALL
+  USING (public.can_manage_projects()) WITH CHECK (public.can_manage_projects());
+
+DROP POLICY IF EXISTS "cf_assign_read"   ON public.custom_field_assignments;
+DROP POLICY IF EXISTS "cf_assign_manage" ON public.custom_field_assignments;
+CREATE POLICY "cf_assign_read"   ON public.custom_field_assignments FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "cf_assign_manage" ON public.custom_field_assignments FOR ALL
+  USING (public.can_manage_projects()) WITH CHECK (public.can_manage_projects());
+
+-- Values: visible EXACTLY where the parent entry is visible. Each policy
+-- below mirrors one of the six on timesheet_entries — deliberately
+-- restated rather than simplified, because a looser rule here would leak
+-- per-entry operational detail to someone who cannot see the entry
+-- itself.
+DROP POLICY IF EXISTS "efv_read_own"              ON public.timesheet_entry_field_values;
+DROP POLICY IF EXISTS "efv_read_manager"          ON public.timesheet_entry_field_values;
+DROP POLICY IF EXISTS "efv_read_privileged"       ON public.timesheet_entry_field_values;
+DROP POLICY IF EXISTS "efv_read_global_analytics" ON public.timesheet_entry_field_values;
+DROP POLICY IF EXISTS "efv_read_team_analytics"   ON public.timesheet_entry_field_values;
+DROP POLICY IF EXISTS "efv_read_hr_view"          ON public.timesheet_entry_field_values;
+DROP POLICY IF EXISTS "efv_insert_own"            ON public.timesheet_entry_field_values;
+
+CREATE POLICY "efv_read_own" ON public.timesheet_entry_field_values
+  FOR SELECT USING (
+    entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      WHERE t.employee_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "efv_read_manager" ON public.timesheet_entry_field_values
+  FOR SELECT USING (
+    (public.my_has_role('manager') OR public.my_has_role('c_suite'))
+    AND entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.i_manage(t.employee_id) AND public.can_see_office(pr.office_id)
+    )
+  );
+
+CREATE POLICY "efv_read_privileged" ON public.timesheet_entry_field_values
+  FOR SELECT USING (
+    (public.my_has_role('hr') OR public.my_has_role('c_suite') OR public.my_has_role('it'))
+    AND entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.can_see_office(pr.office_id)
+    )
+  );
+
+CREATE POLICY "efv_read_global_analytics" ON public.timesheet_entry_field_values
+  FOR SELECT USING (
+    public.my_has_role('global_analytics')
+    AND entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.can_see_office(pr.office_id)
+    )
+  );
+
+CREATE POLICY "efv_read_team_analytics" ON public.timesheet_entry_field_values
+  FOR SELECT USING (
+    public.my_has_role('team_analytics')
+    AND entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.i_manage(t.employee_id) AND public.can_see_office(pr.office_id)
+    )
+  );
+
+CREATE POLICY "efv_read_hr_view" ON public.timesheet_entry_field_values
+  FOR SELECT USING (
+    public.my_has_role('hr_view_timesheets')
+    AND entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      JOIN public.profiles pr ON pr.id = t.employee_id
+      WHERE public.can_see_office(pr.office_id)
+    )
+  );
+
+-- Writable only by the entry's owner, and only while the parent timesheet
+-- is still pending — mirroring entries_insert_own as fixed in v15, so
+-- values can't be appended to an already-approved sheet.
+CREATE POLICY "efv_insert_own" ON public.timesheet_entry_field_values
+  FOR INSERT WITH CHECK (
+    entry_id IN (
+      SELECT e.id FROM public.timesheet_entries e
+      JOIN public.timesheets t ON t.id = e.timesheet_id
+      WHERE t.employee_id = auth.uid() AND t.status = 'pending'
+    )
+  );
+
+-- ── (g) Usage count, for the archive-with-warning flow ──────────────
+-- D-c: archiving an in-use option warns with a count, then proceeds.
+-- SECURITY DEFINER because a projects_control user legitimately needs the
+-- count across every employee's entries, which RLS would otherwise trim
+-- to only the ones they can see — a misleadingly low number is worse than
+-- no number. Returns a bare integer, no per-entry detail.
+CREATE OR REPLACE FUNCTION public.custom_field_option_usage(p_option UUID)
+RETURNS INT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COUNT(*)::INT FROM public.timesheet_entry_field_values WHERE option_id = p_option;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.custom_field_option_usage(UUID) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION public.custom_field_option_usage(UUID) TO authenticated;

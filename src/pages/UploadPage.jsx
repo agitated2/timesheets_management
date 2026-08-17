@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, UserX,
@@ -23,12 +23,21 @@ function fileToBase64(file) {
   })
 }
 
+// Returns null for anything the DB would reject, so an invalid range
+// simply reads as "no hours yet" and fails the isReady gate rather than
+// silently producing a plausible-looking number.
+//
+// This deliberately does NOT wrap past midnight any more. It used to do
+// `if (h < 0) h += 24`, making 22:00-02:00 a valid 4h entry — the
+// entries_no_time_overlap trigger (migration v20) now rejects that, so
+// wrapping here would compute hours for a row the database refuses.
+// An overnight shift is entered as two entries, one on each day.
 function calcHours(from, to) {
   if (!from || !to) return null
   const [fh, fm] = from.split(':').map(Number)
   const [th, tm] = to.split(':').map(Number)
-  let h = (th + tm / 60) - (fh + fm / 60)
-  if (h < 0) h += 24
+  const h = (th + tm / 60) - (fh + fm / 60)
+  if (h <= 0) return null
   return Math.round(h * 100) / 100
 }
 
@@ -168,9 +177,12 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
     disciplineViolations = [], hasDisciplineViolations = false,
     leaveViolations = [], hasLeaveViolations = false,
     duplicateDayViolations = [], hasDuplicateDayViolations = false,
+    overlapViolations = [], hasOverlapViolations = false,
+    wrappedRangeViolations = [], hasWrappedRangeViolations = false,
   } = preview
   const blocked = hasDiscrepancies || hasMissingTasks || hasProjectViolations ||
-    hasDisciplineViolations || hasLeaveViolations || hasDuplicateDayViolations
+    hasDisciplineViolations || hasLeaveViolations || hasDuplicateDayViolations ||
+    hasOverlapViolations || hasWrappedRangeViolations
   const [expandedDay, setExpandedDay] = useState(null)
   const isMulti   = totalDays > 1
   const dateRange = isMulti
@@ -375,6 +387,62 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
           </div>
         )}
 
+        {/* ── Wrapped / inverted time ranges ───────────────── */}
+        {hasWrappedRangeViolations && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {wrappedRangeViolations.length} entr{wrappedRangeViolations.length !== 1 ? 'ies end' : 'y ends'} before {wrappedRangeViolations.length !== 1 ? 'they start' : 'it starts'}
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {wrappedRangeViolations.map((v, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium text-gray-800 dark:text-gray-200">
+                      {format(parseISO(v.date), 'EEE, MMM d, yyyy')}
+                      <span className="text-gray-500"> · {v.timeRange}</span>
+                    </p>
+                    {v.rowNumber && (
+                      <span className="text-xs text-gray-400 flex-shrink-0">Row {v.rowNumber}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              An overnight shift must be split into one entry per day — e.g. 22:00–23:59 on the first day and 00:00–02:00 on the next.
+            </p>
+          </div>
+        )}
+
+        {/* ── Overlapping entries ──────────────────────────── */}
+        {hasOverlapViolations && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide">
+              {overlapViolations.length} overlapping time{overlapViolations.length !== 1 ? 's' : ''}
+            </p>
+            <div className="rounded-xl border border-red-200 dark:border-red-800 overflow-hidden divide-y divide-red-100 dark:divide-red-900/40">
+              {overlapViolations.map((v, i) => (
+                <div key={i} className="px-4 py-3 bg-red-50/60 dark:bg-red-950/20 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium text-gray-800 dark:text-gray-200">
+                      {format(parseISO(v.date), 'EEE, MMM d, yyyy')}
+                      <span className="text-gray-500"> · {v.rangeA} clashes with {v.rangeB}</span>
+                    </p>
+                    {v.rowNumbers?.length > 0 && (
+                      <span className="text-xs text-gray-400 flex-shrink-0">
+                        Row{v.rowNumbers.length > 1 ? 's' : ''} {v.rowNumbers.join(', ')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Two entries on the same day can't cover the same clock time. Adjust the times and re-upload.
+            </p>
+          </div>
+        )}
+
         {/* ── Leave conflicts ──────────────────────────────── */}
         {hasLeaveViolations && (
           <div className="space-y-2">
@@ -485,12 +553,23 @@ function ConfirmationScreen({ preview, onConfirm, onCancel, confirming }) {
 // used to decide whether the panel has to open upward instead of down.
 const SELECT_PANEL_MAX_HEIGHT = 224
 
+// Below this, a search box is more clutter than help — a three-stage
+// dropdown doesn't need one. Custom fields (which can carry hundreds of
+// options, e.g. a building list) cross it immediately.
+const SELECT_SEARCH_THRESHOLD = 8
+
 function SelectField({ value, options, onChange, placeholder, disabled, className }) {
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState(null)
+  const [search, setSearch] = useState('')
   const triggerRef = useRef(null)
   const panelRef = useRef(null)
+  const searchRef = useRef(null)
   const selected = options.find(o => o.id === value)
+
+  const showSearch = options.length >= SELECT_SEARCH_THRESHOLD
+  const q = search.trim().toLowerCase()
+  const shownOptions = q ? options.filter(o => (o.name || '').toLowerCase().includes(q)) : options
 
   // Positioned `fixed` from the trigger's own screen rect, not `absolute`
   // inside this component — every row lives inside DateCard's `overflow-hidden`
@@ -507,8 +586,16 @@ function SelectField({ value, options, onChange, placeholder, disabled, classNam
       top: openUp ? undefined : rect.bottom + 4,
       bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
     })
+    setSearch('')
     setOpen(true)
   }
+
+  // Focus the search box on open so a long list is type-to-filter without
+  // an extra click. Deferred a frame — the panel isn't mounted yet at the
+  // moment openDropdown() runs.
+  useEffect(() => {
+    if (open && showSearch) requestAnimationFrame(() => searchRef.current?.focus())
+  }, [open, showSearch])
 
   useEffect(() => {
     if (!open) return
@@ -560,25 +647,43 @@ function SelectField({ value, options, onChange, placeholder, disabled, classNam
         <div
           ref={panelRef}
           style={{ left: pos.left, top: pos.top, bottom: pos.bottom, minWidth: pos.width }}
-          className="fixed z-30 w-max max-w-[240px] max-h-56 overflow-y-auto rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg py-1"
+          className="fixed z-30 w-max max-w-[280px] rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg py-1 flex flex-col"
         >
-          {options.length === 0 ? (
-            <p className="px-3 py-1.5 text-sm text-gray-400 italic whitespace-nowrap">No options available</p>
-          ) : (
-            options.map(o => (
-              <button
-                key={o.id}
-                type="button"
-                onClick={() => { onChange(o.id); setOpen(false) }}
-                className={clsx(
-                  'block w-full text-left px-3 py-1.5 text-sm whitespace-nowrap hover:bg-gray-100 dark:hover:bg-gray-800',
-                  o.id === value ? 'font-medium text-ae7-red' : 'text-gray-700 dark:text-gray-200',
-                )}
-              >
-                {o.name}
-              </button>
-            ))
+          {/* Search sits OUTSIDE the scroll container so it stays put
+              while the list below scrolls. */}
+          {showSearch && (
+            <div className="px-2 pb-1 pt-0.5 border-b border-gray-100 dark:border-gray-800">
+              <input
+                ref={searchRef}
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search…"
+                className="w-full text-sm px-2 py-1 rounded bg-gray-50 dark:bg-gray-800 border border-transparent focus:border-gray-300 dark:focus:border-gray-600 outline-none"
+              />
+            </div>
           )}
+          <div className="max-h-56 overflow-y-auto">
+            {options.length === 0 ? (
+              <p className="px-3 py-1.5 text-sm text-gray-400 italic whitespace-nowrap">No options available</p>
+            ) : shownOptions.length === 0 ? (
+              <p className="px-3 py-1.5 text-sm text-gray-400 italic whitespace-nowrap">No matches</p>
+            ) : (
+              shownOptions.map(o => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => { onChange(o.id); setOpen(false) }}
+                  className={clsx(
+                    'block w-full text-left px-3 py-1.5 text-sm whitespace-nowrap hover:bg-gray-100 dark:hover:bg-gray-800',
+                    o.id === value ? 'font-medium text-ae7-red' : 'text-gray-700 dark:text-gray-200',
+                  )}
+                >
+                  {o.name}
+                </button>
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -640,8 +745,31 @@ function TaskCell({ value, placeholder, onOpen, className }) {
 // visible overlap. Applied via inline style (not a Tailwind class) since
 // `minmax()` argument commas don't survive Tailwind's arbitrary-value
 // parsing.
-const ENTRY_GRID_COLS =
-  'minmax(110px,220px) minmax(90px,160px) minmax(90px,160px) minmax(96px,auto) minmax(96px,auto) minmax(90px,1fr) minmax(68px,auto) 32px'
+// The custom-field track (migration_v21) sits right after Discipline, but
+// only EXISTS when something in this day actually uses it — a project
+// with no custom fields gets the original 8-column layout with no
+// reserved gap. entryGridCols() builds the template both ways, and
+// DateCard/EntryRow agree on which one via the same `hasCustomColumn`
+// flag, so the header, every row, and the track list never disagree
+// about how many cells there are.
+//
+// It's narrower than Project/Stage on purpose: it holds short values like
+// a building number.
+//
+// ONE track, not one per field, because the field SET varies per row —
+// two rows on different stages can carry different fields entirely, and a
+// shared subgrid header can't label a column that means "Building" on one
+// row and "Zone" on the next. Multiple fields on a single row stack
+// inside this one cell instead.
+const ENTRY_GRID_HEAD = 'minmax(110px,220px) minmax(90px,160px) minmax(90px,160px)'
+const ENTRY_GRID_CUSTOM = 'minmax(84px,132px)'
+const ENTRY_GRID_TAIL = 'minmax(96px,auto) minmax(96px,auto) minmax(90px,1fr) minmax(68px,auto) 32px'
+
+function entryGridCols(hasCustomColumn) {
+  return hasCustomColumn
+    ? `${ENTRY_GRID_HEAD} ${ENTRY_GRID_CUSTOM} ${ENTRY_GRID_TAIL}`
+    : `${ENTRY_GRID_HEAD} ${ENTRY_GRID_TAIL}`
+}
 
 // ── In-App Entry ─────────────────────────────────────────────────
 function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
@@ -655,6 +783,12 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   const [submitting, setSubmitting]   = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [office, setOffice]           = useState(null)  // { name, timezone, timesheet_deadline }
+  // Custom fields (migration_v21). Loaded once for the whole form rather
+  // than per row: the assignment set is small, and every row needs to
+  // resolve against it as soon as its stage changes.
+  const [customFields, setCustomFields] = useState([])       // { id, name }[]
+  const [fieldOptions, setFieldOptions] = useState({})       // field_id -> option[]
+  const [fieldAssignments, setFieldAssignments] = useState([])
 
   useEffect(() => {
     if (!profile?.office_id) return
@@ -679,10 +813,55 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
       const byProject = {}
       ;(stages || []).forEach(s => { (byProject[s.project_id] ||= []).push(s) })
       setProjects((projs || []).map(p => ({ ...p, project_stages: byProject[p.id] || [] })))
+
+      // Custom fields for the projects this employee can log against.
+      // Archived options are excluded here rather than filtered at render
+      // time so a retired option can never be picked on a NEW entry,
+      // while existing values keep resolving through their own FK.
+      const [{ data: cf }, { data: cfOpts }, { data: cfAssign }] = await Promise.all([
+        supabase.from('custom_fields').select('id, name').eq('is_active', true).order('name'),
+        supabase.from('custom_field_options').select('id, field_id, label, is_na_sentinel, is_archived')
+          .eq('is_archived', false).order('sort_order'),
+        supabase.from('custom_field_assignments').select('field_id, project_id, stage_id, requirement').in('project_id', ids),
+      ])
+      setCustomFields(cf || [])
+      const optsByField = {}
+      ;(cfOpts || []).forEach(o => { (optsByField[o.field_id] ||= []).push(o) })
+      setFieldOptions(optsByField)
+      setFieldAssignments(cfAssign || [])
+
       setLoading(false)
     }
     load()
   }, [profile.id])
+
+  // Which fields apply to a stage, and how. Mirrors the fields_for_stage()
+  // SQL helper from migration_v21 — most specific wins, so a stage-level
+  // assignment overrides the project-level one, and 'disabled' rows are
+  // dropped here (the assignment UI needs to see them; the entry form
+  // does not).
+  const fieldsForStage = useCallback((projectId, stageId) => {
+    if (!projectId || !stageId) return []
+    const relevant = fieldAssignments.filter(a =>
+      a.project_id === projectId && (a.stage_id === stageId || a.stage_id === null)
+    )
+    const resolved = new Map()
+    for (const a of relevant) {
+      const existing = resolved.get(a.field_id)
+      // A stage-specific row always beats the project-level fallback.
+      if (!existing || (existing.stage_id === null && a.stage_id !== null)) {
+        resolved.set(a.field_id, a)
+      }
+    }
+    return [...resolved.values()]
+      .filter(a => a.requirement !== 'disabled')
+      .map(a => {
+        const field = customFields.find(f => f.id === a.field_id)
+        return field ? { ...field, requirement: a.requirement, options: fieldOptions[a.field_id] || [] } : null
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [fieldAssignments, customFields, fieldOptions])
 
   function newDateEntry() {
     return { id: crypto.randomUUID(), date: format(new Date(), 'yyyy-MM-dd'), entries: [] }
@@ -698,6 +877,10 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
       stageId:      carryFrom?.stageId      || '',
       disciplineId: carryFrom?.disciplineId || profile?.discipline_id || '',
       timeFrom: '', timeTo: '', task: '',
+      // field_id -> option_id. Carried over with project/stage, since a
+      // row cloned from the one above is usually the same building/zone
+      // too — the same reasoning that carries project and stage.
+      customValues: { ...(carryFrom?.customValues || {}) },
     }
   }
 
@@ -717,7 +900,39 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   function updateEntry(dateId, entryId, field, value) {
     setDateEntries(prev => prev.map(d =>
       d.id === dateId
-        ? { ...d, entries: d.entries.map(e => e.id === entryId ? { ...e, [field]: value, ...(field === 'projectId' ? { stageId: '' } : {}) } : e) }
+        ? {
+            ...d,
+            entries: d.entries.map(e => {
+              if (e.id !== entryId) return e
+              // Changing project or stage changes which custom fields
+              // apply, so any value collected under the old stage is
+              // meaningless — clear rather than carry a value for a field
+              // that may not even be assigned here.
+              const resetCustom = (field === 'projectId' || field === 'stageId') ? { customValues: {} } : {}
+              return {
+                ...e,
+                [field]: value,
+                ...(field === 'projectId' ? { stageId: '' } : {}),
+                ...resetCustom,
+              }
+            }),
+          }
+        : d
+    ))
+  }
+
+  // field_id -> option_id, on one entry.
+  function updateEntryCustomValue(dateId, entryId, fieldId, optionId) {
+    setDateEntries(prev => prev.map(d =>
+      d.id === dateId
+        ? {
+            ...d,
+            entries: d.entries.map(e =>
+              e.id === entryId
+                ? { ...e, customValues: { ...e.customValues, [fieldId]: optionId } }
+                : e
+            ),
+          }
         : d
     ))
   }
@@ -758,11 +973,53 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
 
   const hasStageIssues = stageIssues.length > 0
 
-  const isReady = !hasStageIssues &&
+  // Overlapping-time guard. The entries_no_time_overlap trigger
+  // (migration v20) is the real guarantee; this exists so the offending
+  // rows are marked inline instead of the whole submit failing with one
+  // Postgres error naming a single pair.
+  //
+  // Returns a Set of entry ids involved in ANY overlap within their own
+  // day — both sides get flagged, since neither is more "wrong" than the
+  // other. Half-open comparison: adjacency (10:00 to 10:00) is fine.
+  const overlappingEntryIds = useMemo(() => {
+    const bad = new Set()
+    for (const de of dateEntries) {
+      const timed = de.entries.filter(e => e.timeFrom && e.timeTo)
+      for (let i = 0; i < timed.length; i++) {
+        for (let j = i + 1; j < timed.length; j++) {
+          const a = timed[i], b = timed[j]
+          if (a.timeFrom < b.timeTo && a.timeTo > b.timeFrom) {
+            bad.add(a.id)
+            bad.add(b.id)
+          }
+        }
+      }
+    }
+    return bad
+  }, [dateEntries])
+
+  const hasOverlaps = overlappingEntryIds.size > 0
+
+  // A field assigned as 'required' must have a value — but N/A counts as
+  // a value (it's a real option, see migration_v21), so choosing "not
+  // applicable" satisfies the requirement. That's the whole point of the
+  // sentinel: "required" means "make a decision", not "must be non-empty".
+  function missingRequiredFields(entry) {
+    return fieldsForStage(entry.projectId, entry.stageId)
+      .filter(f => f.requirement === 'required' && !entry.customValues?.[f.id])
+  }
+
+  const isReady = !hasStageIssues && !hasOverlaps &&
     dateEntries.length > 0 &&
     dateEntries.every(de =>
       de.date && de.entries.length > 0 &&
-      de.entries.every(e => e.projectId && e.stageId && e.timeFrom && e.timeTo && e.task?.trim() && e.disciplineId)
+      // calcHours returns null for an inverted/zero-length range (it no
+      // longer wraps past midnight), so this also gates those out.
+      de.entries.every(e =>
+        e.projectId && e.stageId && e.timeFrom && e.timeTo && e.task?.trim() && e.disciplineId &&
+        calcHours(e.timeFrom, e.timeTo) !== null &&
+        missingRequiredFields(e).length === 0
+      )
     )
 
   // Duplicate-day guard: catches both a repeated date within this same
@@ -777,6 +1034,16 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
     const withinDupe = dates.find(d => seen.has(d) || !seen.add(d))
     if (withinDupe) {
       setDupError(`${format(parseISO(withinDupe), 'MMM d, yyyy')} is entered more than once above — each date can only appear once.`)
+      return
+    }
+    // Overlapping times within a day. Reported here as well as inline
+    // per-row, so clicking through to preview with an overlap present
+    // gives a reason rather than a disabled button with no explanation.
+    const overlapDay = dateEntries.find(de =>
+      de.entries.some(e => overlappingEntryIds.has(e.id))
+    )
+    if (overlapDay) {
+      setDupError(`Two or more entries on ${format(parseISO(overlapDay.date), 'MMM d, yyyy')} cover overlapping times. Adjust them so they don't clash.`)
       return
     }
     // Compared against the OFFICE's today, not the browser's — the two
@@ -856,9 +1123,14 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
         }
       })
 
-      const { error: entErr } = await supabase
+      // .select() so the inserted ids come back — the custom field values
+      // below need them. A single multi-row INSERT ... RETURNING yields
+      // rows in the order supplied, so index alignment with `de.entries`
+      // holds.
+      const { data: insertedEntries, error: entErr } = await supabase
         .from('timesheet_entries')
         .insert(entries.map(({ stage_name, ...e }) => e))
+        .select('id')
       if (entErr) {
         // Roll back the just-created timesheet so a leave-blocked entry
         // (or any failure) never leaves an empty timesheet behind.
@@ -866,6 +1138,32 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
         setSubmitting(false)
         setSubmitError(entErr.message)
         return
+      }
+
+      // Custom field values (migration_v21). option_label_snapshot is
+      // filled server-side by the entry_field_values_snapshot trigger, so
+      // it's deliberately not sent from here — a client-supplied label
+      // could disagree with the option it points at.
+      const fieldValueRows = []
+      de.entries.forEach((e, i) => {
+        const entryId = insertedEntries?.[i]?.id
+        if (!entryId) return
+        for (const [fieldId, optionId] of Object.entries(e.customValues || {})) {
+          if (optionId) fieldValueRows.push({ entry_id: entryId, field_id: fieldId, option_id: optionId })
+        }
+      })
+
+      if (fieldValueRows.length > 0) {
+        const { error: cvErr } = await supabase.from('timesheet_entry_field_values').insert(fieldValueRows)
+        if (cvErr) {
+          // Same rollback reasoning as above — a timesheet whose entries
+          // are missing their custom values is worse than no timesheet,
+          // because the gap is invisible once submitted.
+          await supabase.from('timesheets').delete().eq('id', ts.id)
+          setSubmitting(false)
+          setSubmitError(cvErr.message)
+          return
+        }
       }
 
       resultDays.push({
@@ -966,8 +1264,12 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   const enteringForToday = officeNow && dateEntries.some(de => de.date === officeNow.date)
 
   // ── Editing step ─────────────────────────────────────────────
+  // Wider than the rest of the app's max-w-4xl pages: the entry grid now
+  // carries nine tracks (custom fields added a column), and at 4xl the
+  // Task column gets squeezed to its 90px floor as soon as a project with
+  // custom fields is picked.
   return (
-    <div className="max-w-4xl space-y-5">
+    <div className="max-w-6xl space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
@@ -1038,6 +1340,9 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
                 getStageWarning={getStageWarning}
                 canRemove={dateEntries.length > 1}
                 maxDate={officeNow?.date}
+                overlappingEntryIds={overlappingEntryIds}
+                fieldsForStage={fieldsForStage}
+                onUpdateCustomValue={(entryId, fieldId, optionId) => updateEntryCustomValue(de.id, entryId, fieldId, optionId)}
               />
             ))}
           </div>
@@ -1081,12 +1386,39 @@ function InAppEntry({ profile, xlsxEnabled, onSwitchToExcel, onSuccess }) {
   )
 }
 
-function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove, maxDate }) {
+function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemoveEntry, onUpdateEntry, onRemove, getStageWarning, canRemove, maxDate, overlappingEntryIds, fieldsForStage, onUpdateCustomValue }) {
   // maxDate is the OFFICE's today, not the browser's — see officeLocalNow.
   // This only stops the picker offering future days; the real guarantee is
   // the timesheets_block_future trigger (migration_v17), which also covers
   // the XLSX importer.
   const isFuture = maxDate && de.date > maxDate
+
+  // The custom-field column only exists if something in THIS day uses it,
+  // so a project without custom fields keeps the original layout and no
+  // blank track. Its header is the field's own name when every row
+  // resolves to the same single field — the normal case, and far more
+  // useful than a generic word — falling back to "Details" only when a day
+  // mixes stages carrying different fields.
+  const { hasCustomColumn, customFieldHeader } = useMemo(() => {
+    if (!fieldsForStage) return { hasCustomColumn: false, customFieldHeader: '' }
+    const names = new Set()
+    let sawMultiple = false
+    for (const e of de.entries) {
+      const fields = fieldsForStage(e.projectId, e.stageId)
+      if (fields.length > 1) sawMultiple = true
+      fields.forEach(f => names.add(f.name))
+    }
+    if (names.size === 0) return { hasCustomColumn: false, customFieldHeader: '' }
+    return {
+      hasCustomColumn: true,
+      customFieldHeader: names.size === 1 && !sawMultiple ? [...names][0] : 'Details',
+    }
+  }, [de.entries, fieldsForStage])
+
+  const headerLabels = hasCustomColumn
+    ? ['Project', 'Stage', 'Discipline', customFieldHeader, 'From', 'To', 'Task', 'Hours']
+    : ['Project', 'Stage', 'Discipline', 'From', 'To', 'Task', 'Hours']
+
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30">
@@ -1119,10 +1451,11 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
         // see EntryRow) so `auto`-sized columns are computed across all of them
         // together and stay aligned — a separate grid per row can't do that,
         // each would size its own columns independently.
-        <div className="px-5 sm:grid sm:gap-x-3" style={{ gridTemplateColumns: ENTRY_GRID_COLS }}>
-          {/* Column header (desktop only) */}
-          {['Project', 'Stage', 'Discipline', 'From', 'To', 'Task', 'Hours'].map(label => (
-            <span key={label} className="hidden sm:block pt-3 pb-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+        <div className="px-5 sm:grid sm:gap-x-3" style={{ gridTemplateColumns: entryGridCols(hasCustomColumn) }}>
+          {/* Column header (desktop only). Trailing span is the spacer for
+              the remove-button track. */}
+          {headerLabels.map((label, i) => (
+            <span key={i} className="hidden sm:block pt-3 pb-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider truncate">
               {label}
             </span>
           ))}
@@ -1139,6 +1472,10 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
               onRemove={() => onRemoveEntry(e.id)}
               getStageWarning={getStageWarning}
               isFirst={idx === 0}
+              isOverlapping={overlappingEntryIds?.has(e.id)}
+              customFields={fieldsForStage ? fieldsForStage(e.projectId, e.stageId) : []}
+              hasCustomColumn={hasCustomColumn}
+              onUpdateCustomValue={(fieldId, optionId) => onUpdateCustomValue?.(e.id, fieldId, optionId)}
             />
           ))}
         </div>
@@ -1153,7 +1490,7 @@ function DateCard({ de, projects, disciplines, onDateChange, onAddEntry, onRemov
   )
 }
 
-function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getStageWarning, isFirst }) {
+function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getStageWarning, isFirst, isOverlapping, customFields = [], hasCustomColumn = false, onUpdateCustomValue }) {
   const selectedProject = projects.find(p => p.id === entry.projectId)
   const stages = selectedProject
     ? [...(selectedProject.project_stages || [])]
@@ -1168,6 +1505,11 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
   const warning = getStageWarning(entry, date)
   const [taskOpen, setTaskOpen] = useState(false)
 
+  // calcHours returns null for an inverted or zero-length range now that
+  // it no longer wraps past midnight — surface that as its own message
+  // rather than leaving the Hours cell showing a bare "—".
+  const badRange = entry.timeFrom && entry.timeTo && hours === null
+
   // The drawer covers the grid, so name the row it belongs to.
   const selectedStage = stages.find(s => s.id === entry.stageId)
   const taskContext = [
@@ -1178,7 +1520,7 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
 
   return (
     // `grid-cols-subgrid` at sm+ inherits the parent DateCard grid's column
-    // tracks (see ENTRY_GRID_COLS) instead of defining its own, so this row's
+    // tracks (see entryGridCols) instead of defining its own, so this row's
     // cells size and align together with every other row and the header.
     // Below sm it's an ordinary 2-col grid, independent of the parent (which
     // isn't a grid at all on mobile) — the stacked label/value layout is
@@ -1214,6 +1556,61 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
           placeholder="Discipline…"
         />
 
+        {/* Custom fields (migration_v21) — one grid cell, however many
+            fields apply. The field name is the placeholder rather than a
+            separate label, matching Project…/Stage…/Discipline… above, so
+            the control is self-describing without adding a label row and
+            growing every entry.
+            The whole column is omitted (not just left empty) when nothing
+            in this day uses it — see entryGridCols. When the column DOES
+            exist but this particular row has no fields, the cell still has
+            to be emitted, or every column after it shifts left on that
+            row only — rendered as a muted, non-interactive box rather than
+            an invisible spacer, so the row reads as a table cell that
+            doesn't apply here instead of a hole in the layout. Same
+            treatment the Hours cell already uses when it has no value.
+            Desktop only: on mobile there are no shared tracks to keep
+            aligned, so a placeholder there would just be noise. */}
+        {customFields.length > 0 && (
+          <div className="col-span-2 sm:hidden text-xs font-medium text-gray-500">
+            {customFields.map(f => f.name).join(' · ')}
+          </div>
+        )}
+        {hasCustomColumn && customFields.length === 0 ? (
+          <div
+            title="No custom fields for this stage"
+            className="input hidden sm:flex items-center justify-center text-sm text-gray-300 dark:text-gray-600 bg-gray-50/60 dark:bg-gray-800/30 select-none"
+          >
+            —
+          </div>
+        ) : customFields.length === 0 ? null : (
+          <div className="col-span-2 sm:col-span-1 space-y-1.5 min-w-0">
+            {customFields.map(f => {
+              const naOption = f.options.find(o => o.is_na_sentinel)
+              const rest = f.options.filter(o => !o.is_na_sentinel)
+              // N/A first, then the real options — mirrors sort_order = -1
+              // on the sentinel, and keeps "not applicable" a one-click
+              // choice rather than something to scroll past.
+              const opts = [
+                ...(naOption ? [{ id: naOption.id, name: naOption.label }] : []),
+                ...rest.map(o => ({ id: o.id, name: o.label })),
+              ]
+              const value = entry.customValues?.[f.id] || ''
+              const unset = f.requirement === 'required' && !value
+              return (
+                <SelectField
+                  key={f.id}
+                  value={value}
+                  options={opts}
+                  onChange={v => onUpdateCustomValue?.(f.id, v)}
+                  placeholder={f.requirement === 'required' ? `${f.name} *` : `${f.name}…`}
+                  className={clsx(unset && '[&>button]:border-red-300 dark:[&>button]:border-red-800')}
+                />
+              )
+            })}
+          </div>
+        )}
+
         <div className="sm:hidden text-xs font-medium text-gray-500">From *</div>
         <input type="time" value={entry.timeFrom} onChange={e => onUpdate('timeFrom', e.target.value)} className="input text-sm" />
 
@@ -1246,6 +1643,22 @@ function EntryRow({ entry, date, projects, disciplines, onUpdate, onRemove, getS
           <div className="col-span-full flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
             <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
             {warning}
+          </div>
+        )}
+
+        {/* Invalid range — "to" at or before "from" (blocking) */}
+        {badRange && (
+          <div className="col-span-full flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
+            <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
+            This entry must end after it starts. For an overnight shift, add one entry on each day.
+          </div>
+        )}
+
+        {/* Overlapping time (blocking) */}
+        {isOverlapping && !badRange && (
+          <div className="col-span-full flex items-start gap-2 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg px-3 py-2">
+            <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
+            This entry's time overlaps another entry on the same day.
           </div>
         )}
 
@@ -1320,13 +1733,21 @@ function UploadPageInner({ profile }) {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) throw new Error('Not authenticated')
     const base64 = await fileToBase64(file)
-    const res = await fetch('/.netlify/functions/parse-timesheet', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ file: base64, fileName: file.name, dryRun: isDryRun }),
+    // functions.invoke() attaches the current session's Authorization
+    // header automatically — no manual fetch/headers needed.
+    const { data, error } = await supabase.functions.invoke('parse-timesheet', {
+      body: { file: base64, fileName: file.name, dryRun: isDryRun },
     })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error || 'Upload failed')
+    if (error) {
+      // On a non-2xx response supabase-js returns data: null and puts the
+      // raw Response on error.context — the function's own { error } body
+      // (the actually useful message) lives there, not on `error` itself.
+      let message = error.message
+      if (error.context?.json) {
+        try { message = (await error.context.json())?.error || message } catch { /* body wasn't JSON */ }
+      }
+      throw new Error(message)
+    }
     return data
   }
 

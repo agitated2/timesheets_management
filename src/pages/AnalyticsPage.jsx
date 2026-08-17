@@ -127,6 +127,10 @@ function ProjectInsights({ dark }) {
   const [stages, setStages]       = useState([])
   const [entries, setEntries]     = useState([])
   const [loading, setLoading]     = useState(false)
+  // Custom fields (migration_v21) assigned anywhere on this project.
+  const [customFields, setCustomFields] = useState([])   // { id, name }[]
+  const [cfFilter, setCfFilter]   = useState({})         // field_id -> option_id[]
+  const [groupByField, setGroupByField] = useState('')   // field_id | ''
 
   useEffect(() => {
     supabase.from('projects').select('id, name, tracking_type, total_hours').order('name')
@@ -138,23 +142,96 @@ function ProjectInsights({ dark }) {
   useEffect(() => {
     if (!projectId) return
     setLoading(true)
+    // Filters/grouping are reset on project change — a field assigned to
+    // the previous project may not exist on this one, and a stale filter
+    // would silently zero out the charts.
+    setCfFilter({})
+    setGroupByField('')
     Promise.all([
       supabase.from('project_stages_view').select('*').eq('project_id', projectId).order('order_index'),
+      // Custom values come back nested per entry. option_label_snapshot is
+      // what the option said when the entry was submitted — see
+      // migration_v21; grouping uses the id, display uses the snapshot,
+      // so renaming an option later never rewrites past reports.
       supabase.from('timesheet_entries')
-        .select('hours_decimal, discipline_id, disciplines(name), timesheets!inner(date, status)')
+        .select(`
+          hours_decimal, discipline_id, disciplines(name),
+          timesheets!inner(date, status),
+          timesheet_entry_field_values(field_id, option_id, option_label_snapshot)
+        `)
         .eq('project_id', projectId)
         .in('timesheets.status', ['approved', 'pending']),
-    ]).then(([s, e]) => { setStages(s.data || []); setEntries(e.data || []); setLoading(false) })
+      supabase.from('custom_field_assignments')
+        .select('field_id, requirement, custom_fields(id, name, is_active)')
+        .eq('project_id', projectId),
+    ]).then(([s, e, cf]) => {
+      setStages(s.data || [])
+      setEntries(e.data || [])
+      // De-duplicate: a field assigned at both project and stage level
+      // returns several rows, but it's one field for reporting purposes.
+      const seen = new Map()
+      ;(cf.data || []).forEach(a => {
+        const f = a.custom_fields
+        if (f?.is_active && !seen.has(f.id)) seen.set(f.id, { id: f.id, name: f.name })
+      })
+      setCustomFields([...seen.values()].sort((a, b) => a.name.localeCompare(b.name)))
+      setLoading(false)
+    })
   }, [projectId])
 
   const project = projects.find(p => p.id === projectId)
 
-  // Discipline filter applies to the logged-hours charts.
-  const shownEntries = useMemo(
-    () => deptFilter.length ? entries.filter(e => deptFilter.includes(e.discipline_id)) : entries,
-    [entries, deptFilter]
-  )
+  // Every option actually present in this project's data, per field.
+  // Derived from the entries rather than the full option list so the
+  // filter never offers a value that would return nothing here.
+  const cfOptionsByField = useMemo(() => {
+    const acc = {}
+    entries.forEach(e => {
+      (e.timesheet_entry_field_values || []).forEach(v => {
+        (acc[v.field_id] ||= new Map()).set(v.option_id, v.option_label_snapshot)
+      })
+    })
+    return Object.fromEntries(
+      Object.entries(acc).map(([fieldId, m]) => [
+        fieldId,
+        [...m].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label)),
+      ])
+    )
+  }, [entries])
+
+  // Discipline + custom field filters apply to the logged-hours charts.
+  // An entry matches a custom filter if it holds any of the selected
+  // options for that field; multiple fields are ANDed together.
+  const shownEntries = useMemo(() => {
+    let out = deptFilter.length ? entries.filter(e => deptFilter.includes(e.discipline_id)) : entries
+    for (const [fieldId, optionIds] of Object.entries(cfFilter)) {
+      if (!optionIds?.length) continue
+      out = out.filter(e =>
+        (e.timesheet_entry_field_values || []).some(v => v.field_id === fieldId && optionIds.includes(v.option_id))
+      )
+    }
+    return out
+  }, [entries, deptFilter, cfFilter])
+
   const deptOptions = useMemo(() => disciplines.map(d => ({ value: d.id, label: d.name })), [disciplines])
+
+  // Hours grouped by the selected custom field. Entries with no value for
+  // it fall into an explicit "Unspecified" bucket rather than being
+  // dropped (HANDOFF_PLAN decision D-e) — so the grouped total always
+  // reconciles against the project total, and gaps in data collection are
+  // visible instead of silently shrinking the chart.
+  const byCustomField = useMemo(() => {
+    if (!groupByField) return []
+    const acc = {}
+    shownEntries.forEach(e => {
+      const v = (e.timesheet_entry_field_values || []).find(x => x.field_id === groupByField)
+      const key = v?.option_label_snapshot || 'Unspecified'
+      acc[key] = (acc[key] || 0) + (Number(e.hours_decimal) || 0)
+    })
+    return Object.entries(acc)
+      .map(([name, hours]) => ({ name, hours: Math.round(hours * 100) / 100 }))
+      .sort((a, b) => b.hours - a.hours)
+  }, [shownEntries, groupByField])
 
   // 1. Actual hours logged per stage
   const actualHours = useMemo(() => stages.filter(s => !s.is_archived).map(s => ({
@@ -196,6 +273,24 @@ function ProjectInsights({ dark }) {
         <div className="min-w-[180px]">
           <MultiSelectDropdown options={deptOptions} value={deptFilter} onChange={setDeptFilter} placeholder="All disciplines" />
         </div>
+
+        {/* One filter per custom field that actually has values on this
+            project — a field assigned but never filled in offers nothing
+            to filter by, so it's omitted rather than shown empty. */}
+        {customFields.filter(f => cfOptionsByField[f.id]?.length).map(f => (
+          <div key={f.id} className="flex items-center gap-2">
+            <label className="text-sm font-medium">{f.name}</label>
+            <div className="min-w-[160px]">
+              <MultiSelectDropdown
+                options={cfOptionsByField[f.id]}
+                value={cfFilter[f.id] || []}
+                onChange={v => setCfFilter(prev => ({ ...prev, [f.id]: v }))}
+                placeholder={`All ${f.name.toLowerCase()}`}
+              />
+            </div>
+          </div>
+        ))}
+
         {project && (
           <span className="text-xs text-gray-500 ml-auto">{totalLogged}h logged</span>
         )}
@@ -225,6 +320,55 @@ function ProjectInsights({ dark }) {
               </BarChart>
             </ResponsiveContainer>
           </div>
+
+          {/* 1b. Hours grouped by a custom field. Only offered when the
+              project actually has fields with data — otherwise this is an
+              empty control that never does anything. */}
+          {customFields.filter(f => cfOptionsByField[f.id]?.length).length > 0 && (
+            <div className="card p-5">
+              <div className="flex items-center gap-3 flex-wrap mb-4">
+                <h2 className="font-semibold text-sm flex items-center gap-2">
+                  <BarChart2 size={16} className="text-blue-500" /> Hours by
+                </h2>
+                <select
+                  value={groupByField}
+                  onChange={e => setGroupByField(e.target.value)}
+                  className="input text-sm max-w-[220px]"
+                >
+                  <option value="">Select a field…</option>
+                  {customFields.filter(f => cfOptionsByField[f.id]?.length).map(f => (
+                    <option key={f.id} value={f.id}>{f.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {!groupByField ? (
+                <p className="text-sm text-gray-400 text-center py-12">
+                  Pick a custom field to break the logged hours down by it.
+                </p>
+              ) : byCustomField.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-12">No logged hours match the current filters.</p>
+              ) : (
+                <>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={byCustomField} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} />
+                      <XAxis dataKey="name" tick={{ fontSize: 11, fill: axisColor(dark) }} />
+                      <YAxis tick={{ fontSize: 11, fill: axisColor(dark) }} />
+                      <Tooltip {...tip} formatter={(v) => [v + 'h', 'Hours']} />
+                      <Bar dataKey="hours" name="Hours" fill="#8B5CF6" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                  {byCustomField.some(b => b.name === 'Unspecified') && (
+                    <p className="text-xs text-gray-400 mt-2">
+                      "Unspecified" covers entries logged without a value for this field — including any
+                      submitted before it was added to this project.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             {/* 2. Workforce by discipline */}

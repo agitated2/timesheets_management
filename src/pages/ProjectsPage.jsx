@@ -5,12 +5,14 @@ import {
   Briefcase, Plus, Search, ChevronDown, ChevronUp,
   Users, Pencil, Check, X, AlertTriangle, ChevronLeft,
   ChevronRight, ScrollText, CalendarDays, Download, Archive,
-  UserPlus, Trash2, FolderPlus,
+  UserPlus, Trash2, FolderPlus, ListTree,
 } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import clsx from 'clsx'
 import Tabs from '../components/Tabs'
 import { SkeletonList } from '../components/Skeleton'
+import CustomFieldsTab from '../components/projects/CustomFieldsTab'
+import CustomFieldAssignmentsModal from '../components/projects/CustomFieldAssignmentsModal'
 
 const PAGE_SIZE = 10
 
@@ -567,7 +569,7 @@ function StageRow({ stage, project, onEditStage, onArchiveStage, readonly }) {
 }
 
 // ── Project Card ─────────────────────────────────────────────────
-function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onEditProject, onManageMembers, onArchive, onArchiveStage }) {
+function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onEditProject, onManageMembers, onManageFields, onArchive, onArchiveStage }) {
   const members        = project.project_members || []
   const allStages      = (project.project_stages || []).sort((a, b) => a.order_index - b.order_index)
   const stages         = allStages.filter(s => !s.is_archived)
@@ -664,13 +666,21 @@ function ProjectCard({ project, expanded, onToggle, onAddStage, onEditStage, onE
 
           {/* Footer actions */}
           {!isArchived && (
-            <div className="flex justify-between items-center pt-1 border-t border-gray-100 dark:border-gray-800">
-              <button
-                onClick={() => onEditProject(project)}
-                className="text-xs text-gray-500 hover:text-ae7-red flex items-center gap-1 transition-colors"
-              >
-                <Pencil size={12} /> Edit timeline
-              </button>
+            <div className="flex justify-between items-center gap-3 flex-wrap pt-1 border-t border-gray-100 dark:border-gray-800">
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => onEditProject(project)}
+                  className="text-xs text-gray-500 hover:text-ae7-red flex items-center gap-1 transition-colors"
+                >
+                  <Pencil size={12} /> Edit timeline
+                </button>
+                <button
+                  onClick={() => onManageFields(project)}
+                  className="text-xs text-gray-500 hover:text-ae7-red flex items-center gap-1 transition-colors"
+                >
+                  <ListTree size={12} /> Custom fields
+                </button>
+              </div>
               <button
                 onClick={() => onArchive(project)}
                 className="text-xs text-gray-400 hover:text-red-500 flex items-center gap-1 transition-colors"
@@ -795,6 +805,7 @@ export default function ProjectsPage() {
   const [editStageFor, setEditStageFor] = useState(null)  // { stage, project }
   const [editProjectFor, setEditProjectFor] = useState(null)
   const [membersFor, setMembersFor]     = useState(null)
+  const [fieldsFor, setFieldsFor]       = useState(null)
   const [showImport, setShowImport]     = useState(false)
 
   const loadProjects = useCallback(async () => {
@@ -854,6 +865,7 @@ export default function ProjectsPage() {
 
   const tabs = [
     { id: 'projects', label: 'Projects' },
+    { id: 'fields',   label: 'Custom Fields' },
     { id: 'archived', label: `Archived${archivedProjects.length + allArchivedStages.length > 0 ? ` (${archivedProjects.length + allArchivedStages.length})` : ''}` },
     { id: 'logs',     label: 'Logs' },
   ]
@@ -888,6 +900,13 @@ export default function ProjectsPage() {
       )}
       {membersFor && (
         <ManageMembersModal project={membersFor} onClose={() => setMembersFor(null)} onSaved={() => { loadProjects(); showToast('Members updated.') }} />
+      )}
+      {fieldsFor && (
+        <CustomFieldAssignmentsModal
+          project={fieldsFor}
+          onClose={() => setFieldsFor(null)}
+          onSaved={() => showToast('Custom fields updated.')}
+        />
       )}
       {showImport && (
         <ImportModal existingProjects={projects} onClose={() => setShowImport(false)} onImported={() => { loadProjects(); showToast('Projects imported.') }} />
@@ -943,6 +962,7 @@ export default function ProjectsPage() {
                   onEditStage={(stage, project) => setEditStageFor({ stage, project })}
                   onEditProject={setEditProjectFor}
                   onManageMembers={setMembersFor}
+                  onManageFields={setFieldsFor}
                   onArchive={handleArchive}
                   onArchiveStage={handleArchiveStage}
                 />
@@ -1007,6 +1027,8 @@ export default function ProjectsPage() {
           </div>
         </div>
       )}
+
+      {activeTab === 'fields' && <CustomFieldsTab showToast={showToast} />}
 
       {activeTab === 'logs' && <LogsTab projects={projects} />}
     </div>

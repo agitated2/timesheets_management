@@ -136,7 +136,54 @@ function EmployeeRow({ emp, discName, officeName, onOpenDetail, onOpenCalendar }
   )
 }
 
-// ── Detail modal: everything that used to be inline in the accordion ──
+// ── Detail modal ──────────────────────────────────────────────────
+// Small local primitives — a labelled row and a section wrapper — so the
+// three sections below share one alignment/spacing rule instead of each
+// re-deriving it inline.
+
+function Section({ title, count, children }) {
+  return (
+    <section className="space-y-3">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-400 flex items-center gap-2">
+        {title}
+        {count != null && (
+          <span className="text-gray-300 dark:text-gray-600 font-normal normal-case tracking-normal">{count}</span>
+        )}
+      </h4>
+      {children}
+    </section>
+  )
+}
+
+// Label sits in a fixed-width column so every value lines up, rather than
+// each row wrapping at its own label's width.
+function DetailRow({ label, children }) {
+  return (
+    <div className="flex items-center gap-3 min-h-[32px]">
+      <span className="text-xs text-gray-400 w-24 flex-shrink-0">{label}</span>
+      <div className="min-w-0 flex-1 text-sm">{children}</div>
+    </div>
+  )
+}
+
+// Used/total bar. Over-use (more taken than allowed) is possible via
+// manual adjustment, so the fill is clamped and recoloured rather than
+// overflowing its track.
+function BalanceBar({ used, allowance }) {
+  const total = Number(allowance) || 0
+  const taken = Number(used) || 0
+  const pct = total > 0 ? Math.min(100, (taken / total) * 100) : 0
+  const over = total > 0 && taken > total
+  return (
+    <div className="h-1.5 rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden">
+      <div
+        className={clsx('h-full rounded-full transition-all', over ? 'bg-red-500' : 'bg-ae7-red')}
+        style={{ width: `${total > 0 ? Math.max(pct, taken > 0 ? 4 : 0) : 0}%` }}
+      />
+    </div>
+  )
+}
+
 function EmployeeDetailModal({ emp, projects, balances, calendarName, officeName, categories, disciplines, discName, canManage, onChanged, onClose }) {
   const balByCat = new Map(balances.map(b => [b.category_id, b]))
   // Categories are per-office now — only show the employee's own office's
@@ -148,78 +195,110 @@ function EmployeeDetailModal({ emp, projects, balances, calendarName, officeName
       title={emp.full_name || emp.email}
       icon={<Users size={16} className="text-ae7-red" />}
       onClose={onClose}
-      wide
+      size="xl"
     >
-      <div className="p-6 space-y-5">
-        <p className="text-xs text-gray-400 -mt-3">{emp.email}</p>
-
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Discipline</span>
-            {canManage ? (
-              <DisciplineEditor employeeId={emp.id} current={emp.discipline_id} disciplines={disciplines} onSaved={onChanged} />
-            ) : (
-              <span className="text-sm">{discName || '—'}</span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Joining date</span>
-            {canManage ? (
-              <JoiningDateEditor employeeId={emp.id} current={emp.joining_date} onSaved={onChanged} />
-            ) : (
-              <span className="text-sm">{emp.joining_date ? format(parseISO(emp.joining_date), 'MMM d, yyyy') : '—'}</span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Office</span>
-            <span className="text-sm">{officeName || '—'}</span>
-            {canManage && <span className="text-xs text-gray-400">(change in IT Panel → Offices)</span>}
-          </div>
-        </div>
-
-        {/* Projects */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Projects</p>
-          {projects.length === 0 ? (
-            <p className="text-xs text-gray-400">None assigned</p>
-          ) : (
-            <ul className="space-y-1">
-              {projects.map((p, i) => <li key={i} className="text-sm">{p}</li>)}
-            </ul>
+      {/* Identity header — visually distinct from the body below, so the
+          "who is this" question is answered before any detail. */}
+      <div className="px-6 py-4 bg-gray-50/70 dark:bg-gray-800/30 border-b border-gray-100 dark:border-gray-800">
+        <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+          {emp.full_name || '—'}
+        </p>
+        <p className="text-xs text-gray-400 truncate">{emp.email}</p>
+        {/* Office and discipline only. Joining date deliberately NOT a
+            chip here: it's shown (and edited) in Details below, and the
+            same value appearing twice at two different precisions reads
+            as two different facts. */}
+        <div className="flex flex-wrap gap-1.5 mt-2.5">
+          {officeName && (
+            <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300">
+              <Building2 size={11} /> {officeName}
+            </span>
+          )}
+          {discName && (
+            <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300">
+              <Layers size={11} /> {discName}
+            </span>
           )}
         </div>
+      </div>
 
-        {/* Leave balances */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Leave allowances (days)</p>
-          <div className="space-y-1.5">
-            {paidCategories.map(c => {
-              const b = balByCat.get(c.id)
-              return (
-                <div key={c.id} className="flex items-center justify-between gap-3 text-sm">
-                  <span className="min-w-0 truncate">{c.name}</span>
-                  <div className="flex items-center gap-3 flex-shrink-0">
-                    {b ? (
-                      <span className="text-xs text-right leading-tight">
-                        <span className="block text-gray-700 dark:text-gray-300 tabular-nums font-medium">{Number(b.remaining)} available</span>
-                        <span className="block text-gray-400 tabular-nums">{Number(b.used)} taken · {Number(b.allowance)} total</span>
-                      </span>
-                    ) : (
-                      <span className="text-gray-500 text-xs">—</span>
-                    )}
-                    {canManage && (
-                      <AllowanceEditor employeeId={emp.id} category={c} onSaved={onChanged} />
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-            {paidCategories.length === 0 && (
-              <p className="text-xs text-gray-400">No paid leave categories defined.</p>
+      <div className="p-6 space-y-6">
+        {/* Two columns at sm+ so Details and Projects sit side by side
+            instead of stacking into a long scroll; one column on mobile. */}
+        <div className="grid sm:grid-cols-2 gap-6">
+          <Section title="Details">
+            <div className="space-y-1">
+              <DetailRow label="Discipline">
+                {canManage ? (
+                  <DisciplineEditor employeeId={emp.id} current={emp.discipline_id} disciplines={disciplines} onSaved={onChanged} />
+                ) : (
+                  <span>{discName || '—'}</span>
+                )}
+              </DetailRow>
+              <DetailRow label="Joining date">
+                {canManage ? (
+                  <JoiningDateEditor employeeId={emp.id} current={emp.joining_date} onSaved={onChanged} />
+                ) : (
+                  <span>{emp.joining_date ? format(parseISO(emp.joining_date), 'MMM d, yyyy') : '—'}</span>
+                )}
+              </DetailRow>
+              <DetailRow label="Office">
+                <span>{officeName || '—'}</span>
+              </DetailRow>
+              <DetailRow label="Calendar">
+                <span className="truncate block">{calendarName || '—'}</span>
+              </DetailRow>
+            </div>
+          </Section>
+
+          <Section title="Projects" count={projects.length || null}>
+            {projects.length === 0 ? (
+              <p className="text-xs text-gray-400">None assigned</p>
+            ) : (
+              <ul className="space-y-1.5 max-h-40 overflow-y-auto">
+                {projects.map((p, i) => (
+                  <li key={i} className="text-sm flex items-start gap-2">
+                    <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600 mt-2 flex-shrink-0" />
+                    <span className="min-w-0">{p}</span>
+                  </li>
+                ))}
+              </ul>
             )}
-          </div>
-          <p className="text-xs text-gray-400 mt-3">Calendar: <span className="text-gray-600 dark:text-gray-300">{calendarName}</span></p>
+          </Section>
         </div>
+
+        <Section title="Leave allowances">
+          {paidCategories.length === 0 ? (
+            <p className="text-xs text-gray-400">No paid leave categories defined.</p>
+          ) : (
+            <div className="space-y-3">
+              {paidCategories.map(c => {
+                const b = balByCat.get(c.id)
+                return (
+                  <div key={c.id} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm min-w-0 truncate">{c.name}</span>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        {b ? (
+                          <span className="text-xs tabular-nums text-gray-500 dark:text-gray-400">
+                            <span className="font-medium text-gray-700 dark:text-gray-200">{Number(b.remaining)}</span>
+                            {' '}left · {Number(b.used)} of {Number(b.allowance)} taken
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-400">Not set</span>
+                        )}
+                        {canManage && (
+                          <AllowanceEditor employeeId={emp.id} category={c} onSaved={onChanged} />
+                        )}
+                      </div>
+                    </div>
+                    {b && <BalanceBar used={b.used} allowance={b.allowance} />}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Section>
       </div>
     </Modal>
   )

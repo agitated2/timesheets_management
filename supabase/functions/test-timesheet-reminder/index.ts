@@ -25,33 +25,15 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { sendMail } from '../_shared/graph-mail.ts'
 import { buildReminderEmail, type ReportRow } from '../_shared/reminder-templates.ts'
+import { json, corsPreflight } from '../_shared/cors.ts'
 
-// Unlike daily-timesheet-reminders (called only server-to-server, by cron
-// or curl), this function is invoked directly from the browser via
-// supabase-js's functions.invoke(). That always sends a CORS preflight
-// OPTIONS request first — Authorization isn't a CORS-safelisted header —
-// and without an explicit OPTIONS handler + these headers on every
-// response, the preflight fails and the browser never sends the real
-// request at all. supabase-js reports that as the unhelpful "Failed to
-// send a request to the Edge Function", with no server-side log to explain
-// it since the request never arrived.
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
-const jsonHeaders = { 'Content-Type': 'application/json', ...CORS_HEADERS }
 // Deliberately loose — this only gatekeeps obvious typos before spending a
 // Graph call; Graph itself is the real authority on deliverability.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders })
-}
-
 Deno.serve(async (req: Request) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS_HEADERS })
-  }
+  const preflight = corsPreflight(req)
+  if (preflight) return preflight
   if (req.method !== 'POST') {
     return json(405, { error: 'Method not allowed' })
   }

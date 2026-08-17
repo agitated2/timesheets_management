@@ -4,11 +4,12 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   User, Shield, Search, CheckCircle,
   Save, Info, Users, AlertCircle, Lock, Eye, EyeOff,
-  ChevronLeft, ChevronRight, Building2,
+  ChevronLeft, ChevronRight, Building2, ShieldCheck, ShieldAlert,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import { SkeletonList } from '../components/Skeleton'
+import MfaEnrollFlow from '../components/MfaEnrollFlow'
 
 const PAGE_SIZE = 10
 
@@ -245,7 +246,7 @@ function PasswordSection() {
     <section className="p-6 space-y-5">
       <h2 className="text-sm font-semibold">Password</h2>
       <p className="text-sm text-gray-500 dark:text-gray-400 -mt-2">
-        Set or change your password. If you sign in with email links, you can set a password here to use credentials instead.
+        Set or change your password.
       </p>
 
       <form onSubmit={handleSave} className="space-y-4">
@@ -301,6 +302,62 @@ function PasswordSection() {
           )}
         </button>
       </form>
+    </section>
+  )
+}
+
+// ----------------------------------------------------------------
+// Two-factor authentication — self-service setup only. Removal is
+// IT-only (auth hardening D2): offering self-removal here would make
+// mandatory MFA voluntary, since anyone could just turn it back off.
+// ----------------------------------------------------------------
+function MfaSection() {
+  const [factor, setFactor] = useState(undefined) // undefined = loading, null = none
+  const [enrolling, setEnrolling] = useState(false)
+  const [justEnrolled, setJustEnrolled] = useState(false)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.auth.mfa.listFactors()
+    setFactor((data?.totp || []).find(f => f.status === 'verified') || null)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  return (
+    <section className="p-6 space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold">Two-factor authentication</h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          Adds a second step at sign-in using an authenticator app.
+        </p>
+      </div>
+
+      {factor === undefined ? (
+        <div className="h-10 w-40 bg-gray-100 dark:bg-gray-800 rounded-lg animate-pulse" />
+      ) : enrolling ? (
+        <MfaEnrollFlow
+          onCancel={() => setEnrolling(false)}
+          onEnrolled={() => { setEnrolling(false); setJustEnrolled(true); load() }}
+        />
+      ) : factor ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 font-medium">
+            <ShieldCheck size={16} /> Enabled
+          </div>
+          {justEnrolled && (
+            <p className="text-xs text-gray-400">Two-factor authentication is now active on your account.</p>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400 font-medium">
+            <ShieldAlert size={16} /> Not set up
+          </div>
+          <button onClick={() => setEnrolling(true)} className="btn-secondary text-sm">
+            <ShieldCheck size={14} /> Set up two-factor authentication
+          </button>
+        </div>
+      )}
     </section>
   )
 }
@@ -527,6 +584,7 @@ export default function SettingsPage() {
       <div className="card divide-y divide-gray-100 dark:divide-gray-800">
         <ProfileSection profile={profile} refreshProfile={refreshProfile} />
         <PasswordSection />
+        <MfaSection />
       </div>
 
       {isIT && <RoleManagementSection />}

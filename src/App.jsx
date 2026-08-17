@@ -18,7 +18,6 @@ import ProjectsPage from './pages/ProjectsPage'
 import RequestsPage from './pages/RequestsPage'
 import HRPanelPage from './pages/HRPanelPage'
 import EmployeeOverviewPage from './pages/EmployeeOverviewPage'
-import AuthCallback from './pages/AuthCallback'
 
 function RoleGate({ allow, children }) {
   const { profile, hasRole } = useAuth()
@@ -33,7 +32,6 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/auth" element={user ? <Navigate to="/dashboard" replace /> : <AuthPage />} />
-      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/" element={<Navigate to={user ? '/dashboard' : '/auth'} replace />} />
 
       <Route element={<ProtectedRoute />}>
