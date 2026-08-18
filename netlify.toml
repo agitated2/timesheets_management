@@ -1,19 +1,20 @@
 [build]
   command = "npm run build"
   publish = "dist"
-  functions = "netlify/functions"
 
 [build.environment]
-  NODE_VERSION = "18"
+  NODE_VERSION = "22"
+
+# All server-side logic (create-user, update-user, delete-user,
+# delete-timesheets, parse-timesheet) has moved to Supabase Edge
+# Functions — see supabase/functions/. This file is now only used, if at
+# all, for `netlify dev`'s Vite proxy during local development; there is
+# no [functions] block because there are no functions left to bundle.
 
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
-
-[functions]
-  directory = "netlify/functions"
-  node_bundler = "esbuild"
 
 [dev]
   framework = "vite"

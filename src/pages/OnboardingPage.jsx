@@ -9,6 +9,8 @@ export default function OnboardingPage() {
   const navigate = useNavigate()
 
   const [fullName, setFullName]           = useState(profile?.full_name || '')
+  const [disciplineId, setDisciplineId]   = useState(profile?.discipline_id || '')
+  const [disciplines, setDisciplines]     = useState([])
   const [managers, setManagers]           = useState([])
   const [managerSearch, setManagerSearch] = useState('')
   const [selectedManager, setSelectedManager] = useState(null)
@@ -18,10 +20,16 @@ export default function OnboardingPage() {
   useEffect(() => {
     supabase
       .from('profiles')
-      .select('id, full_name, email, role')
-      .in('role', ['manager', 'c_suite'])
+      .select('id, full_name, email, roles')
+      .filter('roles', 'ov', '{manager,c_suite}')
       .order('full_name')
       .then(({ data }) => setManagers(data ?? []))
+    supabase
+      .from('disciplines')
+      .select('id, name')
+      .eq('is_active', true)
+      .order('name')
+      .then(({ data }) => setDisciplines(data ?? []))
   }, [])
 
   const filteredManagers = managers.filter(m => {
@@ -32,13 +40,15 @@ export default function OnboardingPage() {
   async function handleSubmit(e) {
     e.preventDefault()
     if (!fullName.trim()) { setError('Please enter your full name.'); return }
+    if (!disciplineId) { setError('Please select your discipline.'); return }
     setError('')
     setLoading(true)
 
     const updates = {
       full_name: fullName.trim(),
+      discipline_id: disciplineId,
       onboarding_complete: true,
-      ...(selectedManager && { manager_id: selectedManager.id }),
+      ...(selectedManager && { manager_id: selectedManager.id, manager_ids: [selectedManager.id] }),
     }
 
     const { error: err } = await supabase
@@ -82,6 +92,21 @@ export default function OnboardingPage() {
             </div>
 
             <div>
+              <label className="label" htmlFor="discipline">Discipline</label>
+              <select
+                id="discipline"
+                value={disciplineId}
+                onChange={e => setDisciplineId(e.target.value)}
+                className="input"
+                required
+              >
+                <option value="" disabled>Select your discipline…</option>
+                {disciplines.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+              <p className="text-xs text-gray-400 mt-1">Your discipline can only be changed later by HR or IT.</p>
+            </div>
+
+            <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="label mb-0">Line manager <span className="text-gray-400 font-normal">(if applicable)</span></label>
                 {selectedManager && (
@@ -91,7 +116,7 @@ export default function OnboardingPage() {
                 )}
               </div>
               <p className="text-xs text-gray-400 mb-2">
-                Select who will review your timesheets. You can also do this later from Settings.
+                Select who will review your timesheets. To change or add more managers later, contact your IT department.
               </p>
 
               {selectedManager ? (
@@ -100,7 +125,7 @@ export default function OnboardingPage() {
                     <CheckCircle size={16} className="text-emerald-500" />
                     <span className="text-sm font-medium">{selectedManager.full_name || selectedManager.email}</span>
                     <span className="text-xs text-gray-500">
-                      ({selectedManager.role === 'c_suite' ? 'C-Suite' : 'Manager'})
+                      ({(selectedManager.roles || []).includes('c_suite') ? 'C-Suite' : 'Manager'})
                     </span>
                   </div>
                   <button type="button" onClick={() => { setSelectedManager(null); setManagerSearch('') }} className="text-xs text-red-500 hover:underline">
@@ -136,7 +161,7 @@ export default function OnboardingPage() {
                           <div>
                             <p className="text-sm font-medium">{m.full_name || '(No name)'}</p>
                             <p className="text-xs text-gray-400">
-                              {m.email} · {m.role === 'c_suite' ? 'C-Suite' : 'Manager'}
+                              {m.email} · {(m.roles || []).includes('c_suite') ? 'C-Suite' : 'Manager'}
                             </p>
                           </div>
                         </button>

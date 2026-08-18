@@ -1,5 +1,6 @@
-import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import ForceChangePasswordGate from './ForceChangePasswordGate'
 
 export default function ProtectedRoute() {
   const { user, profile, loading } = useAuth()
@@ -19,5 +20,10 @@ export default function ProtectedRoute() {
     return <Navigate to="/onboarding" replace />
   }
 
-  return <Outlet />
+  // Onboarding itself must render past this point regardless of password/
+  // MFA state — both gates already no-op until onboarding_complete, but
+  // the /onboarding route in particular must never be blocked, even
+  // mid-transition. Chain: temp-password check -> MFA check -> Outlet
+  // (see AUTH_HARDENING_PLAN.md Phase 3's stated gate ordering).
+  return <ForceChangePasswordGate />
 }

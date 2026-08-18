@@ -4,3 +4,8 @@ dist
 .env.local
 .netlify
 *.log
+
+# Supabase CLI local state + local-only secrets file (see deployment notes)
+supabase/.temp
+supabase/.branches
+supabase/functions/.env

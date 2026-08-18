@@ -1,0 +1,244 @@
+================================================================
+SECURITY BACKLOG - deferred findings
+Audit date: 2026-08-11
+Scope: full app - RLS policies, all 50 SECURITY DEFINER functions,
+       Netlify service-role endpoints, Supabase Edge Functions,
+       storage policies, frontend route guards.
+================================================================
+
+STATUS SUMMARY
+--------------
+FIXED in supabase/migration_v15_security_fixes.sql:
+  [CRITICAL] Role self-escalation via profiles_update_own
+  [CRITICAL] Self-approving timesheets via timesheets_insert_own
+  [HIGH]     Appending entries to already-approved timesheets
+  [MEDIUM]   notify_hr_approvers callable by any authenticated user
+  [MEDIUM]   Unvalidated office_id from signup metadata
+
+VERIFIED OK (no action needed):
+  Storage bucket 'timesheet-files' confirmed Private by owner.
+
+STILL OPEN - documented below, deliberately deferred.
+
+================================================================
+LOW-1 : Manager can move a timesheet between their own subordinates
+================================================================
+WHERE
+  supabase/schema.sql - policies "timesheets_update_manager" and
+  "timesheets_update_it".
+
+WHAT
+  Both policies specify USING but no WITH CHECK. For an UPDATE policy,
+  Postgres reuses the USING expression as the WITH CHECK when the latter
+  is omitted, so the check is applied to the NEW row as well as the OLD
+  one. That prevents a manager moving a timesheet to someone they do NOT
+  manage, but it still permits reassigning employee_id from one of their
+  own subordinates to another.
+
+  Also note these policies allow updating ANY column, not just `status`
+  and `rejection_reason` - which is what the approve/reject flow actually
+  needs. total_hours and file_path are equally writable by a reviewing
+  manager.
+
+IMPACT
+  Low. Requires an existing manager account; the blast radius is limited
+  to that manager's own reports. It is a data-integrity / audit-trail
+  concern (attributing work to the wrong person) rather than a privilege
+  escalation.
+
+SUGGESTED FIX
+  Add an explicit WITH CHECK that pins employee_id, e.g.
+
+    DROP POLICY IF EXISTS "timesheets_update_manager" ON public.timesheets;
+    CREATE POLICY "timesheets_update_manager" ON public.timesheets
+      FOR UPDATE
+      USING (
+        (public.my_has_role('manager') OR public.my_has_role('c_suite'))
+        AND public.i_manage(employee_id)
+      )
+      WITH CHECK (
+        (public.my_has_role('manager') OR public.my_has_role('c_suite'))
+        AND public.i_manage(employee_id)
+      );
+
+  Pinning employee_id itself (NEW.employee_id = OLD.employee_id) is not
+  expressible in a policy - it needs a BEFORE UPDATE trigger, similar to
+  guard_profile_privileged_columns in v15.
+
+================================================================
+LOW-2 : Cross-employee information leak via SECURITY DEFINER helpers
+================================================================
+WHERE
+  supabase/schema.sql:
+    stage_logged_hours(p_stage UUID)
+    is_working_day(emp UUID, d DATE)
+    leave_working_days(emp UUID, d_start DATE, d_end DATE)
+    emp_calendar(emp UUID)
+    project_office_id(p_project UUID)
+
+WHAT
+  All are SECURITY DEFINER (so they bypass RLS by design, because they
+  are called from inside other policies and functions), all take an
+  arbitrary employee or project/stage id as a parameter rather than
+  deriving it from auth.uid(), and none have a REVOKE. Since
+  CREATE FUNCTION grants EXECUTE to PUBLIC by default, any authenticated
+  user can call them directly over PostgREST RPC with any id they like:
+
+    supabase.rpc('is_working_day', { emp: '<someone-else>', d: '2026-08-01' })
+    supabase.rpc('stage_logged_hours', { p_stage: '<any-stage>' })
+
+  This leaks another employee's working-day/holiday-calendar pattern and
+  leave-day counts, and a project's total logged hours, to anyone who can
+  guess or enumerate a UUID.
+
+IMPACT
+  Low. No writes, no role information, no timesheet contents, and UUIDs
+  are not enumerable from outside. It is an information disclosure that
+  bypasses the office-visibility model, not a privilege escalation.
+
+  NOTE: this is the same class of bug as the timesheet_status_report /
+  reminder_recipients / visible_office_ids_for finding fixed earlier
+  (those were revoked FROM PUBLIC in migration_v13). These five were left
+  because they are lower-value and are called from more places, so each
+  needs its call sites checked before revoking.
+
+SUGGESTED FIX
+  For each function, confirm it is only ever called from inside another
+  SECURITY DEFINER function or an RLS policy (both of which execute as the
+  owner and are therefore unaffected by a PUBLIC revoke), then:
+
+    REVOKE EXECUTE ON FUNCTION public.stage_logged_hours(UUID)      FROM PUBLIC;
+    REVOKE EXECUTE ON FUNCTION public.is_working_day(UUID, DATE)    FROM PUBLIC;
+    REVOKE EXECUTE ON FUNCTION public.leave_working_days(UUID, DATE, DATE) FROM PUBLIC;
+    REVOKE EXECUTE ON FUNCTION public.emp_calendar(UUID)            FROM PUBLIC;
+    REVOKE EXECUTE ON FUNCTION public.project_office_id(UUID)       FROM PUBLIC;
+
+  CAUTION: grep the frontend first. If any of these is called directly
+  from the browser (e.g. a calendar view calling is_working_day), revoking
+  will break that screen. The fix in that case is a thin wrapper that
+  derives the employee from auth.uid() and keeps the raw function internal.
+
+================================================================
+LOW-3 : Inconsistent IT-role check across Netlify functions
+================================================================
+WHERE
+  netlify/functions/delete-user.js       line ~27
+  netlify/functions/delete-timesheets.js line ~25
+  vs.
+  netlify/functions/create-user.js       line ~30
+  netlify/functions/update-user.js       line ~28
+
+WHAT
+  create-user.js and update-user.js accept EITHER the roles array or the
+  legacy single role column:
+
+    callerProfile?.roles?.includes('it') || callerProfile?.role === 'it'
+
+  delete-user.js and delete-timesheets.js check only the array:
+
+    caller?.roles?.includes('it')
+
+IMPACT
+  None from a security standpoint - the stricter check is fail-CLOSED. An
+  IT user who was never migrated onto the `roles` array would simply be
+  denied access to the delete endpoints.
+
+  It is listed here because it is a correctness/consistency wart that
+  could cause a confusing "IT admin only" 403 for a legacy account, and
+  because the same legacy-fallback inconsistency caused a real bug in the
+  reminder job (is_hr in reminder_recipients, fixed earlier).
+
+SUGGESTED FIX
+  Either bring the two delete endpoints in line with the other two, or -
+  better - migrate every remaining legacy `role` value onto the `roles`
+  array and drop the fallback everywhere at once:
+
+    SELECT id, email, role, roles FROM public.profiles
+    WHERE cardinality(roles) = 0;
+
+================================================================
+LOW-4 : Failed rollback leaves orphaned empty timesheets (not a
+        security issue - data integrity)
+================================================================
+WHERE
+  src/pages/UploadPage.jsx around line 852.
+
+WHAT
+  When entry insertion fails, the code tries to roll back the parent
+  timesheet:
+
+    await supabase.from('timesheets').delete().eq('id', ts.id)
+
+  There is NO DELETE policy on public.timesheets for any role. RLS
+  therefore matches zero rows and the delete silently succeeds without
+  deleting anything (supabase-js does not treat "0 rows affected" as an
+  error). The rollback never actually happens.
+
+IMPACT
+  Not a security issue. The result is an orphaned timesheet row with no
+  entries and status 'pending'. Because of idx_timesheets_one_per_day
+  (unique on employee_id+date for pending/approved), that orphan then
+  BLOCKS the employee from resubmitting for that date - they hit
+  "You already have a timesheet awaiting review" with no way to clear it
+  short of IT deleting it via the delete-timesheets endpoint.
+
+  Worth noting this is most likely to fire exactly when the leave-blocking
+  trigger (block_entry_on_hourly_leave) rejects an entry - i.e. a fairly
+  reachable path, not a rare one.
+
+SUGGESTED FIX
+  Two options:
+  (a) Move creation of the timesheet + its entries into a single
+      SECURITY DEFINER RPC so it is one atomic transaction and no
+      client-side rollback is needed. This is the cleaner fix and matches
+      how leave requests are already handled (submit_leave_request).
+  (b) Add a narrow DELETE policy allowing an employee to delete their own
+      PENDING timesheet that has no entries:
+
+        CREATE POLICY "timesheets_delete_own_empty" ON public.timesheets
+          FOR DELETE USING (
+            auth.uid() = employee_id
+            AND status = 'pending'
+            AND NOT EXISTS (
+              SELECT 1 FROM public.timesheet_entries e
+              WHERE e.timesheet_id = timesheets.id
+            )
+          );
+
+      Note (b) also silently fixes the "stuck on that date" symptom.
+
+================================================================
+NOTES ON WHAT WAS CHECKED AND FOUND CLEAN
+================================================================
+Recorded so a future audit does not have to re-derive it:
+
+  - All 4 Netlify service-role endpoints verify the caller's JWT via
+    auth.getUser(token) and THEN re-check the role server-side against
+    the profiles table. None trust a client-supplied role claim.
+  - All 16 admin RPCs checked (set_employee_offices, assign_calendar,
+    set_joining_date, set_leave_balance, adjust_leave_balance,
+    upsert_discipline, set_employee_discipline, create_project,
+    update_project_boundary, create_stage, update_stage_boundary,
+    upsert_leave_policy, run_leave_cycle, expire_carried_leave,
+    upsert_office, plus can_manage_projects) have an internal
+    my_has_role / has_any_hr_flag gate. notify_hr_approvers was the sole
+    exception and is fixed in v15.
+  - public.leave_requests has NO INSERT and NO UPDATE policies at all.
+    Every write goes through a gated SECURITY DEFINER RPC, and
+    decide_leave_request correctly enforces the two-tier
+    manager -> HR sequence and rejects out-of-state transitions.
+  - public.notifications has NO INSERT policy, so notification rows can
+    only originate from triggers/SECURITY DEFINER functions.
+  - handle_new_user() does NOT read roles from signup metadata (only
+    email and office_id), so there is no signup-time role escalation.
+  - The RoleRoute guard in src/App.jsx is client-side only, which is
+    acceptable BECAUSE the underlying RLS is enforced server-side. It is
+    a UX affordance, not a security boundary - do not add server-trusted
+    logic that depends on it.
+  - Edge Function daily-timesheet-reminders compares the Authorization
+    header against SUPABASE_SERVICE_ROLE_KEY, so only the cron job (which
+    supplies it explicitly from Vault) can trigger a real run.
+  - Edge Function test-timesheet-reminder authenticates the caller's own
+    JWT and re-checks my_has_role('it') server-side before doing anything.
+    Its preview-as-any-user capability grants no visibility an IT admin
+    does not already have through the app.

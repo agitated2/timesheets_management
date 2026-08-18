@@ -14,11 +14,14 @@ import NotificationsPage from './pages/NotificationsPage'
 import AnalyticsPage from './pages/AnalyticsPage'
 import AdminPage from './pages/AdminPage'
 import SettingsPage from './pages/SettingsPage'
-import AuthCallback from './pages/AuthCallback'
+import ProjectsPage from './pages/ProjectsPage'
+import RequestsPage from './pages/RequestsPage'
+import HRPanelPage from './pages/HRPanelPage'
+import EmployeeOverviewPage from './pages/EmployeeOverviewPage'
 
 function RoleGate({ allow, children }) {
-  const { profile } = useAuth()
-  if (!profile || !allow.includes(profile.role)) {
+  const { profile, hasRole } = useAuth()
+  if (!profile || !allow.some(r => hasRole(r))) {
     return <Navigate to="/dashboard" replace />
   }
   return children
@@ -29,7 +32,6 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/auth" element={user ? <Navigate to="/dashboard" replace /> : <AuthPage />} />
-      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/" element={<Navigate to={user ? '/dashboard' : '/auth'} replace />} />
 
       <Route element={<ProtectedRoute />}>
@@ -47,11 +49,23 @@ function AppRoutes() {
           <Route path="/reviews"     element={<RoleGate allow={['manager','c_suite','it']}><ReviewsPage /></RoleGate>} />
           <Route path="/review/:id"  element={<ReviewPage />} />
 
-          {/* Analytics — all elevated roles */}
-          <Route path="/analytics"   element={<RoleGate allow={['manager','c_suite','hr','it']}><AnalyticsPage /></RoleGate>} />
+          {/* Analytics — dedicated analytics roles */}
+          <Route path="/analytics"   element={<RoleGate allow={['global_analytics','team_analytics']}><AnalyticsPage /></RoleGate>} />
 
           {/* Settings — all roles; IT gets extra role-management section */}
           <Route path="/settings"    element={<SettingsPage />} />
+
+          {/* Requests — all authenticated users */}
+          <Route path="/requests"    element={<RequestsPage />} />
+
+          {/* HR Panel — any HR flag or IT */}
+          <Route path="/hr"          element={<RoleGate allow={['hr_view_timesheets','hr_manage_policies','hr_manage_calendar','hr_approve_requests','it']}><HRPanelPage /></RoleGate>} />
+
+          {/* Employee Overview — dedicated role or IT */}
+          <Route path="/employees"   element={<RoleGate allow={['employee_overview','it']}><EmployeeOverviewPage /></RoleGate>} />
+
+          {/* Projects */}
+          <Route path="/projects"    element={<RoleGate allow={['projects_control','it']}><ProjectsPage /></RoleGate>} />
 
           {/* IT only */}
           <Route path="/admin"       element={<RoleGate allow={['it']}><AdminPage /></RoleGate>} />

@@ -8,10 +8,11 @@ import {
 } from 'lucide-react'
 import { format } from 'date-fns'
 import clsx from 'clsx'
+import TimesheetPreview from '../components/TimesheetPreview'
 
 export default function ReviewPage() {
   const { id } = useParams()
-  const { profile } = useAuth()
+  const { profile, hasRole } = useAuth()
   const navigate = useNavigate()
   const [ts, setTs] = useState(null)
   const [employee, setEmployee] = useState(null)
@@ -22,13 +23,13 @@ export default function ReviewPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const canReview = ['manager', 'c_suite', 'it'].includes(profile?.role)
+  const canReview = hasRole('manager') || hasRole('c_suite') || hasRole('it')
 
   useEffect(() => {
     async function load() {
       const [{ data: sheet }, { data: ents }] = await Promise.all([
-        supabase.from('timesheets').select('*, profiles!employee_id(*)').eq('id', id).single(),
-        supabase.from('timesheet_entries').select('*').eq('timesheet_id', id).order('time_from'),
+        supabase.from('timesheets').select('*, profiles!employee_id(*), reviewer:profiles!reviewer_id(full_name, email)').eq('id', id).single(),
+        supabase.from('timesheet_entries').select('*, disciplines(name), project_stages(name)').eq('timesheet_id', id).order('time_from'),
       ])
       if (sheet) { setTs(sheet); setEmployee(sheet.profiles) }
       if (ents) setEntries(ents)
@@ -131,9 +132,22 @@ export default function ReviewPage() {
           </div>
         )}
 
-        <button onClick={downloadFile} className="btn-secondary text-sm gap-2">
-          <Download size={15} /> Download original file
-        </button>
+        {ts.status !== 'pending' && ts.reviewer_id && (
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {ts.status === 'approved' ? 'Approved' : 'Rejected'} by{' '}
+            <span className="font-medium text-gray-700 dark:text-gray-300">
+              {ts.reviewer_id === profile.id ? 'You' : (ts.reviewer?.full_name || ts.reviewer?.email || 'a reviewer')}
+            </span>
+          </p>
+        )}
+
+        {ts.file_path === 'inapp' ? (
+          <p className="text-xs text-gray-500 dark:text-gray-400 italic">In-app entry — no original file to download.</p>
+        ) : (
+          <button onClick={downloadFile} className="btn-secondary text-sm gap-2">
+            <Download size={15} /> Download original file
+          </button>
+        )}
       </div>
 
       {/* Entries */}
@@ -141,33 +155,19 @@ export default function ReviewPage() {
         <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-800">
           <h2 className="font-semibold text-sm">Time entries</h2>
         </div>
-        {entries.length === 0 ? (
-          <p className="text-sm text-gray-400 text-center py-8">No entries parsed</p>
-        ) : (
-          <>
-            <div className="hidden sm:grid grid-cols-4 gap-3 px-5 py-2.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 dark:border-gray-800">
-              <span>Time window</span>
-              <span>Hours</span>
-              <span>Project</span>
-              <span>Task</span>
-            </div>
-            <div className="divide-y divide-gray-100 dark:divide-gray-800">
-              {entries.map((e, i) => (
-                <div key={e.id ?? i} className="grid grid-cols-2 sm:grid-cols-4 gap-2 px-5 py-3.5 text-sm">
-                  <span className="font-mono text-xs text-gray-500">{e.time_from ?? '—'} – {e.time_to ?? '—'}</span>
-                  <span className="font-semibold text-blue-600 dark:text-blue-400">{e.hours_decimal != null ? `${e.hours_decimal}h` : '—'}</span>
-                  <span className="font-medium">{e.project_name || '—'}</span>
-                  <span className="text-gray-400">{e.task || '—'}</span>
-                </div>
-              ))}
-            </div>
-            <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-800 flex justify-end">
-              <span className="text-sm font-bold text-blue-600 dark:text-blue-400">
-                Total: {entries.reduce((s, e) => s + (e.hours_decimal || 0), 0).toFixed(2)}h
-              </span>
-            </div>
-          </>
-        )}
+        <TimesheetPreview
+          emptyLabel="No entries parsed"
+          collapsible
+          entries={entries.map(e => ({
+            time_from:       e.time_from,
+            time_to:         e.time_to,
+            hours_decimal:   e.hours_decimal,
+            project_name:    e.project_name,
+            stage_name:      e.project_stages?.name,
+            discipline_name: e.disciplines?.name,
+            task:            e.task,
+          }))}
+        />
       </div>
 
       {/* Actions */}

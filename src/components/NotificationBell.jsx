@@ -18,8 +18,12 @@ export default function NotificationBell() {
     if (!user) return
     fetchNotifications()
 
+    // Unique topic per subscription. Navbar mounts two NotificationBell
+    // instances (mobile + desktop) and StrictMode double-invokes effects;
+    // a shared topic would make supabase-js reuse an already-subscribed
+    // channel and throw "cannot add postgres_changes callbacks after subscribe()".
     const channel = supabase
-      .channel(`notif:${user.id}`)
+      .channel(`notif:${user.id}:${crypto.randomUUID()}`)
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',

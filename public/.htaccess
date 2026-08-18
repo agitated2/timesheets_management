@@ -1,0 +1,47 @@
+# Vite copies everything under public/ straight into dist/ at build time,
+# so this ships with every deploy automatically — a plain `rsync --delete`
+# to public_html can't accidentally wipe it the way a manually-uploaded
+# file could.
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Real files and directories serve normally; everything else falls
+  # through to the SPA so deep links and refreshes (/hr, /reviews,
+  # /review/:id, ...) work instead of 404ing on Apache.
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>
+
+<IfModule mod_headers.c>
+  # Asset filenames are content-hashed (index-<hash>.js), so they can
+  # cache forever — a new deploy ships new filenames, never mutates these.
+  <FilesMatch "\.(js|css|woff2?|png|jpg|svg)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+
+  # index.html must NEVER cache, or a browser can keep serving a stale
+  # shell that references asset hashes deleted by the next deploy.
+  <FilesMatch "^index\.html$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+
+  # ── Auth hardening Phase 4: transport & response headers ──────────
+  #
+  # HSTS is intentionally commented out. It is safe to SEND over plain
+  # HTTP (browsers ignore Strict-Transport-Security unless it arrives
+  # over HTTPS, per spec) but it is NOT safe to enable blind: once a
+  # browser has seen it, it refuses ALL future HTTP connections to this
+  # domain for the full max-age, including the redirect-to-HTTPS page
+  # itself, for every visitor who saw it. Uncomment ONLY after AutoSSL /
+  # Force HTTPS Redirect is confirmed working end-to-end in a real
+  # browser — undoing a bad HSTS rollout means waiting out max-age on
+  # every affected visitor's device.
+  # Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+  Header set X-Content-Type-Options "nosniff"
+  Header set X-Frame-Options "SAMEORIGIN"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
