@@ -76,17 +76,23 @@
   50%       { transform: translateY(-5px); }
 }
 
-/* AE7 logo hover animation */
+/* AE7 logo hover animation.
+   This rule is unlayered and sits after `@tailwind utilities`, so at equal
+   specificity it beats the utility classes on the component — keep
+   align-items in sync with Logo.jsx rather than setting it there. */
 .ae7-logo {
   cursor: default;
   user-select: none;
   transition: transform 0.2s ease, filter 0.2s ease;
   display: inline-flex;
-  align-items: baseline;
+  /* center, not baseline: the mark is now an image and has no baseline
+     for the "Portal" label to sit against */
+  align-items: center;
 }
 .ae7-logo:hover {
   transform: scale(1.06);
-  filter: drop-shadow(0 1px 6px rgba(196, 18, 48, 0.4));
+  /* matches the logotype's bright red, #e51b24 */
+  filter: drop-shadow(0 1px 6px rgba(229, 27, 36, 0.4));
 }
 
 /* ---- Skeleton loading ---- */

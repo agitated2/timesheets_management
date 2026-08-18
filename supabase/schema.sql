@@ -148,9 +148,33 @@ DECLARE v_office UUID;
 BEGIN
   v_office := NULLIF(NEW.raw_user_meta_data->>'office_id', '')::UUID;
 
+  -- Client-supplied metadata, so an unknown or deactivated office id is
+  -- discarded rather than written through verbatim (v15).
   IF v_office IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM public.offices WHERE id = v_office AND is_active) THEN
     v_office := NULL;
+  END IF;
+
+  -- profiles.office_id is NOT NULL, so a NULL here would abort the whole
+  -- auth.users INSERT — the account simply fails to create, with a
+  -- confusing not-null-violation surfacing from a trigger the caller
+  -- never invoked. That happens whenever a user is created WITHOUT office
+  -- metadata, most notably Dashboard -> Authentication -> Add user, which
+  -- sends none — i.e. exactly the bootstrap step on a fresh database.
+  --
+  -- Falling back to an active office keeps account creation working. This
+  -- is NOT a way for a client to choose an office: the metadata path above
+  -- already rejects anything invalid, and this branch ignores client input
+  -- entirely. create-user / bulk-import-users always pass an explicit
+  -- office, so in practice this only fires for manually-created accounts,
+  -- which IT then assigns properly via Admin -> Edit user.
+  IF v_office IS NULL THEN
+    SELECT id INTO v_office FROM public.offices
+     WHERE is_active ORDER BY created_at, name LIMIT 1;
+  END IF;
+
+  IF v_office IS NULL THEN
+    RAISE EXCEPTION 'Cannot create a user before any active office exists. Create an office first (see DEPLOYMENT.md A6).';
   END IF;
 
   INSERT INTO public.profiles (id, email, office_id)
@@ -284,6 +308,27 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
     SELECT 1 FROM public.profiles
     WHERE id = emp_id AND auth.uid() = ANY(manager_ids)
   );
+$$;
+
+-- Helper: holds any HR-panel flag.
+--
+-- Defined HERE, next to the other role helpers, rather than down in the
+-- "EXTEND EXISTING-TABLE READ ACCESS" section where it logically belongs:
+-- the leave_balances / leave_requests policies further up the file call
+-- it, and CREATE POLICY resolves function references immediately (unlike
+-- a plpgsql function body, which is late-bound). Defining it later made a
+-- fresh install fail with:
+--   ERROR 42883: function public.has_any_hr_flag() does not exist
+-- The migrations never hit this because each ran as its own transaction,
+-- long after this function already existed; only the consolidated
+-- schema.sql is order-sensitive.
+CREATE OR REPLACE FUNCTION public.has_any_hr_flag()
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT public.my_has_role('hr_view_timesheets')
+      OR public.my_has_role('hr_manage_policies')
+      OR public.my_has_role('hr_manage_calendar')
+      OR public.my_has_role('hr_approve_requests')
+      OR public.my_has_role('employee_overview');
 $$;
 
 -- ===============================================================
@@ -2207,15 +2252,10 @@ CREATE POLICY "cal_assign_manage" ON public.calendar_assignments
 --  the same reads to power the HR Panel)
 -- ---------------------------------------------------------------
 
--- Helper: holds any HR-panel flag
-CREATE OR REPLACE FUNCTION public.has_any_hr_flag()
-RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT public.my_has_role('hr_view_timesheets')
-      OR public.my_has_role('hr_manage_policies')
-      OR public.my_has_role('hr_manage_calendar')
-      OR public.my_has_role('hr_approve_requests')
-      OR public.my_has_role('employee_overview');
-$$;
+-- has_any_hr_flag() is defined much earlier, right after i_manage() —
+-- the leave policies above call it, and CREATE POLICY resolves function
+-- references immediately. Not repeated here so the two definitions can't
+-- drift apart.
 
 -- Project memberships readable by HR-flag holders (Employee Overview needs this).
 -- The office check goes through this SECURITY DEFINER helper rather than a
