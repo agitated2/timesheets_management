@@ -424,7 +424,7 @@ export default function AnalyticsPage() {
 
   const [employees, setEmployees] = useState([])
   const [projects,  setProjects]  = useState([])
-  const [departments, setDepartments] = useState([])
+  const [disciplines, setDisciplines] = useState([])
   const [allData,   setAllData]   = useState([])
 
   const [startDate,   setStartDate]   = useState(format(subDays(new Date(), 30), 'yyyy-MM-dd'))
@@ -459,16 +459,16 @@ export default function AnalyticsPage() {
       setAllData(data)
       const uniqueEmps = {}
       const uniqueProjs = new Set()
-      const uniqueDepts = {}
+      const uniqueDiscs = {}
       data.forEach(e => {
         const p = e.timesheets?.profiles
         if (p) uniqueEmps[p.id] = p
         if (e.project_name) uniqueProjs.add(e.project_name.trim())
-        if (e.discipline_id && e.disciplines?.name) uniqueDepts[e.discipline_id] = e.disciplines.name
+        if (e.discipline_id && e.disciplines?.name) uniqueDiscs[e.discipline_id] = e.disciplines.name
       })
       setEmployees(Object.values(uniqueEmps).sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '')))
       setProjects([...uniqueProjs].sort())
-      setDepartments(Object.entries(uniqueDepts).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)))
+      setDisciplines(Object.entries(uniqueDiscs).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)))
     }
     setLoading(false)
   }
@@ -482,8 +482,8 @@ export default function AnalyticsPage() {
     })
   }, [allData, empFilters, projFilters, deptFilters])
 
-  // Hours grouped by department (discipline the work was logged under)
-  const byDepartment = useMemo(() => {
+  // Hours grouped by discipline the work was logged under
+  const byDiscipline = useMemo(() => {
     const acc = {}
     filtered.forEach(e => {
       const name = e.disciplines?.name || 'Unspecified'
@@ -611,7 +611,7 @@ export default function AnalyticsPage() {
 
   const empOptions  = employees.map(e => ({ value: e.id,    label: e.full_name || e.email }))
   const projOptions = projects.map(p =>  ({ value: p,       label: p }))
-  const deptOptions = departments.map(d => ({ value: d.id,  label: d.name }))
+  const deptOptions = disciplines.map(d => ({ value: d.id,  label: d.name }))
 
   return (
     <div className="space-y-6">
@@ -673,14 +673,14 @@ export default function AnalyticsPage() {
           </div>
           <div>
             <label className="label text-xs">
-              Department
+              Discipline
               {deptFilters.length > 0 && <span className="ml-1 text-ae7-red">{deptFilters.length} selected</span>}
             </label>
             <MultiSelectDropdown
               options={deptOptions}
               value={deptFilters}
               onChange={setDeptFilters}
-              placeholder="All departments"
+              placeholder="All disciplines"
             />
           </div>
         </div>
@@ -798,24 +798,24 @@ export default function AnalyticsPage() {
             </div>
           </div>
 
-          {/* Hours by department + cross-discipline cost view */}
+          {/* Hours by discipline + cross-discipline cost view */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             <div className="card p-5">
               <h2 className="font-semibold text-sm mb-4 flex items-center gap-2">
-                <BarChart2 size={16} className="text-blue-500" /> Hours by department
+                <BarChart2 size={16} className="text-blue-500" /> Hours by discipline
               </h2>
-              {byDepartment.length === 0 ? (
-                <p className="text-sm text-gray-400 text-center py-16">No department data.</p>
+              {byDiscipline.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-16">No discipline data.</p>
               ) : (
                 <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={byDepartment.slice(0, 10)} layout="vertical" margin={{ top: 5, right: 10, bottom: 5, left: 80 }}>
+                  <BarChart data={byDiscipline.slice(0, 10)} layout="vertical" margin={{ top: 5, right: 10, bottom: 5, left: 80 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke={gridColor(dark)} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 11, fill: axisColor(dark) }} />
                     <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: axisColor(dark) }} width={76}
                       tickFormatter={v => v.length > 14 ? v.slice(0, 14) + '…' : v} />
                     <Tooltip contentStyle={{ background: dark ? '#1F2937' : '#FFF', border: 'none', borderRadius: 12, fontSize: 12 }} formatter={(v) => [v + 'h', 'Hours']} />
                     <Bar dataKey="hours" radius={[0, 6, 6, 0]}>
-                      {byDepartment.slice(0, 10).map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                      {byDiscipline.slice(0, 10).map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
